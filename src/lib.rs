@@ -2,28 +2,29 @@
 
 use std::marker::PhantomData;
 
-use serde_derive::{Deserialize, Serialize};
+// use serde_derive::{Deserialize, Serialize};
 
-const B: usize = 4;
+const B: usize = 2;
 
 pub trait Distance<T> {
     fn distance(a: &T, b: &T) -> f64;
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct PMTree<T, D: Distance<T>, const B: usize, const P: usize>
-where
-    for<'d> [usize; P]: serde::Serialize + serde::Deserialize<'d>,
+// #[derive(Serialize, Deserialize)]
+#[derive(Debug)]
+pub struct PMTree<T, D: Distance<T>, const P: usize>
+// where
+//     for<'d> [usize; P]: serde::Serialize + serde::Deserialize<'d>,
 {
-    root: Box<Node<T, D>>,
+    root: Box<Node<T, D, P>>,
     pivots: [usize; P],
     _markert: PhantomData<T>,
     _markerd: PhantomData<D>,
 }
 
-impl<T, D: Distance<T>, const B: usize, const P: usize> PMTree<T, D, B, P>
-where
-    for<'d> [usize; P]: serde::Serialize + serde::Deserialize<'d>,
+impl<T, D: Distance<T>, const P: usize> PMTree<T, D, P>
+// where
+//     for<'d> [usize; P]: serde::Serialize + serde::Deserialize<'d>,
 {
     pub fn new(pivots: [usize; P]) -> Self {
         Self {
@@ -35,12 +36,12 @@ where
     }
 
     pub fn insert(&mut self, o: usize, dataset: &[T]) {
-        let possible_split = self.root.insert(o, None, dataset);
+        let possible_split = self.root.insert(o, None, self.pivots, dataset);
         if let Some((o1, n1, o2, n2)) = possible_split {
             // replace the current root with a new one
             let mut new_root = InnerNode::new(None);
-            new_root.do_insert(o1, Box::new(n1), None, dataset);
-            new_root.do_insert(o2, Box::new(n2), None, dataset);
+            new_root.do_insert(o1, Box::new(n1), None, self.pivots, dataset);
+            new_root.do_insert(o2, Box::new(n2), None, self.pivots, dataset);
             self.root = Box::new(Node::Inner(new_root));
         }
     }
@@ -50,31 +51,34 @@ where
     }
 }
 
-#[derive(Serialize, Deserialize)]
+// #[derive(Serialize, Deserialize)]
+#[derive(Default, Debug)]
 struct Hyperring {
     min: f64,
     max: f64,
 }
 
-#[derive(Serialize, Deserialize)]
-enum Node<T, D: Distance<T>> {
-    Inner(InnerNode<T, D>),
-    Leaf(LeafNode<T, D>),
+// #[derive(Serialize, Deserialize)]
+#[derive(Debug)]
+enum Node<T, D: Distance<T>, const P: usize> {
+    Inner(InnerNode<T, D, P>),
+    Leaf(LeafNode<T, D, P>),
 }
 
-impl<T, D: Distance<T>> Node<T, D> {
+impl<T, D: Distance<T>, const P: usize> Node<T, D, P> {
     fn insert(
         &mut self,
         o: usize,
         parent: Option<usize>,
+        pivots: [usize; P],
         dataset: &[T],
     ) -> Option<(usize, Self, usize, Self)> {
         match self {
             Node::Inner(inner) => inner
-                .insert(o, parent, dataset)
+                .insert(o, parent, pivots, dataset)
                 .map(|(o1, n1, o2, n2)| (o1, Self::Inner(n1), o2, Self::Inner(n2))),
             Node::Leaf(leaf) => leaf
-                .insert(o, parent, dataset)
+                .insert(o, parent, pivots, dataset)
                 .map(|(o1, n1, o2, n2)| (o1, Self::Leaf(n1), o2, Self::Leaf(n2))),
         }
     }
@@ -139,21 +143,22 @@ impl<T, D: Distance<T>> Node<T, D> {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-struct InnerNode<T, D: Distance<T>> {
+// #[derive(Serialize, Deserialize)]
+#[derive(Debug)]
+struct InnerNode<T, D: Distance<T>, const P: usize> {
     len: usize,
     parent: Option<usize>,
     parent_distance: [Option<f64>; B],
     routers: [usize; B],
     radius: [f64; B],
-    children: [Option<Box<Node<T, D>>>; B],
+    children: [Option<Box<Node<T, D, P>>>; B],
     _markert: PhantomData<T>,
     _markerd: PhantomData<D>,
 }
 
-impl<T, D: Distance<T>> InnerNode<T, D> {
+impl<T, D: Distance<T>, const P: usize> InnerNode<T, D, P> {
     fn new(parent: Option<usize>) -> Self {
-        let children: [Option<Box<Node<T, D>>>; B] = unsafe { std::mem::transmute([0usize; B]) };
+        let children: [Option<Box<Node<T, D, P>>>; B] = unsafe { std::mem::transmute([0usize; B]) };
         Self {
             len: 0,
             parent,
@@ -170,6 +175,7 @@ impl<T, D: Distance<T>> InnerNode<T, D> {
         &mut self,
         o: usize,
         parent: Option<usize>,
+        pivots: [usize; P],
         dataset: &[T],
     ) -> Option<(usize, Self, usize, Self)> {
         // find the routing element closest
@@ -185,7 +191,7 @@ impl<T, D: Distance<T>> InnerNode<T, D> {
                 self.children[closest]
                     .as_mut()
                     .unwrap()
-                    .insert(o, Some(closest), dataset);
+                    .insert(o, Some(closest), pivots, dataset);
 
             if let Some((o1, n1, o2, n2)) = possible_split {
                 // replace node `closest` with o1
@@ -199,10 +205,10 @@ impl<T, D: Distance<T>> InnerNode<T, D> {
 
                 // now, insert the new node directly, if possible, otherwise split the current node
                 if self.len < B {
-                    self.do_insert(o2, Box::new(n2), self.parent, dataset);
+                    self.do_insert(o2, Box::new(n2), self.parent, pivots, dataset);
                     None
                 } else {
-                    Some(self.split(o2, Box::new(n2), dataset))
+                    Some(self.split(o2, Box::new(n2), pivots, dataset))
                 }
             } else {
                 None
@@ -215,8 +221,9 @@ impl<T, D: Distance<T>> InnerNode<T, D> {
     fn do_insert(
         &mut self,
         o: usize,
-        child: Box<Node<T, D>>,
+        child: Box<Node<T, D, P>>,
         parent: Option<usize>,
+        pivots: [usize; P],
         dataset: &[T],
     ) {
         assert!(self.len < B);
@@ -231,7 +238,8 @@ impl<T, D: Distance<T>> InnerNode<T, D> {
     fn split(
         &mut self,
         o2: usize,
-        child: Box<Node<T, D>>,
+        child: Box<Node<T, D, P>>,
+        pivots: [usize; P],
         dataset: &[T],
     ) -> (usize, Self, usize, Self) {
         assert!(self.len == B);
@@ -241,7 +249,7 @@ impl<T, D: Distance<T>> InnerNode<T, D> {
         let mut n1 = Self::new(Some(o1));
         let mut n2 = Self::new(Some(o2));
 
-        n2.do_insert(o2, child, Some(o2), dataset);
+        n2.do_insert(o2, child, Some(o2), pivots, dataset);
         for i in 0..self.len {
             if D::distance(&dataset[self.routers[i]], data1)
                 < D::distance(&dataset[self.routers[i]], data2)
@@ -252,6 +260,7 @@ impl<T, D: Distance<T>> InnerNode<T, D> {
                     self.routers[i],
                     self.children[i].take().unwrap(),
                     Some(o1),
+                    pivots,
                     dataset,
                 );
             } else {
@@ -261,6 +270,7 @@ impl<T, D: Distance<T>> InnerNode<T, D> {
                     self.routers[i],
                     self.children[i].take().unwrap(),
                     Some(o2),
+                    pivots,
                     dataset,
                 );
             }
@@ -270,20 +280,23 @@ impl<T, D: Distance<T>> InnerNode<T, D> {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-struct LeafNode<T, D: Distance<T>> {
+// #[derive(Serialize, Deserialize)]
+#[derive(Debug)]
+struct LeafNode<T, D: Distance<T>, const P: usize> {
     len: usize,
     parent_distance: [Option<f64>; B],
     elements: [usize; B],
+    pivot_distances: [[f64; P]; B],
     _markert: PhantomData<T>,
     _markerd: PhantomData<D>,
 }
 
-impl<T, D: Distance<T>> LeafNode<T, D> {
+impl<T, D: Distance<T>, const P: usize> LeafNode<T, D, P> {
     fn new() -> Self {
         Self {
             len: 0,
             parent_distance: [None; B],
+            pivot_distances: [[0.0; P]; B],
             elements: [0; B],
             _markert: PhantomData,
             _markerd: PhantomData,
@@ -294,17 +307,18 @@ impl<T, D: Distance<T>> LeafNode<T, D> {
         &mut self,
         o: usize,
         parent: Option<usize>,
+        pivots: [usize; P],
         dataset: &[T],
     ) -> Option<(usize, Self, usize, Self)> {
         if self.len == B {
-            Some(self.split(o, dataset))
+            Some(self.split(o, pivots, dataset))
         } else {
-            self.do_insert(o, parent, dataset);
+            self.do_insert(o, parent, pivots, dataset);
             None
         }
     }
 
-    fn do_insert(&mut self, o: usize, parent: Option<usize>, dataset: &[T]) {
+    fn do_insert(&mut self, o: usize, parent: Option<usize>, pivots: [usize; P], dataset: &[T]) {
         assert!(self.len < B);
         self.parent_distance[self.len] =
             parent.map(|parent| D::distance(&dataset[o], &dataset[parent]));
@@ -313,7 +327,12 @@ impl<T, D: Distance<T>> LeafNode<T, D> {
     }
 
     /// Split the current node, leaving it empty, and returns two new nodes with the corresponding routing points
-    fn split(&mut self, o2: usize, dataset: &[T]) -> (usize, Self, usize, Self) {
+    fn split(
+        &mut self,
+        o2: usize,
+        pivots: [usize; P],
+        dataset: &[T],
+    ) -> (usize, Self, usize, Self) {
         assert!(self.len == B);
         let o1 = self.elements[0];
         let data1 = &dataset[o1];
@@ -321,18 +340,18 @@ impl<T, D: Distance<T>> LeafNode<T, D> {
         let mut n1 = Self::new();
         let mut n2 = Self::new();
 
-        n2.insert(o2, Some(o2), dataset);
+        n2.insert(o2, Some(o2), pivots, dataset);
         for i in 0..self.len {
             let d1 = D::distance(&dataset[self.elements[i]], data1);
             let d2 = D::distance(&dataset[self.elements[i]], data2);
             if d1 < d2 {
                 // add to first node
                 assert!(n1.len < B);
-                n1.do_insert(self.elements[i], Some(o1), dataset);
+                n1.do_insert(self.elements[i], Some(o1), pivots, dataset);
             } else {
                 // add to second node
                 assert!(n2.len < B);
-                n2.do_insert(self.elements[i], Some(o2), dataset);
+                n2.do_insert(self.elements[i], Some(o2), pivots, dataset);
             }
         }
         self.len = 0;
@@ -341,7 +360,8 @@ impl<T, D: Distance<T>> LeafNode<T, D> {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+// #[derive(Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Euclidean;
 
 impl Distance<Vec<f64>> for Euclidean {
@@ -377,8 +397,9 @@ mod tests {
             pm_tree.insert(i, &dataset);
         }
 
-        let mut f = File::create("tree.json").unwrap();
-        writeln!(f, "{}", serde_json::to_string_pretty(&pm_tree).unwrap()).unwrap();
+        // let mut f = File::create("tree.json").unwrap();
+        // writeln!(f, "{}", serde_json::to_string_pretty(&pm_tree).unwrap()).unwrap();
+        println!("{:#?}", pm_tree);
 
         assert_eq!(pm_tree.size(), dataset.len());
     }
