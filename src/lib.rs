@@ -12,20 +12,14 @@ pub trait Distance<T> {
 
 // #[derive(Serialize, Deserialize)]
 #[derive(Debug)]
-pub struct PMTree<T, D: Distance<T>, const P: usize>
-// where
-//     for<'d> [usize; P]: serde::Serialize + serde::Deserialize<'d>,
-{
+pub struct PMTree<T, D: Distance<T>, const P: usize> {
     root: Box<Node<T, D, P>>,
     pivots: [usize; P],
     _markert: PhantomData<T>,
     _markerd: PhantomData<D>,
 }
 
-impl<T, D: Distance<T>, const P: usize> PMTree<T, D, P>
-// where
-//     for<'d> [usize; P]: serde::Serialize + serde::Deserialize<'d>,
-{
+impl<T, D: Distance<T>, const P: usize> PMTree<T, D, P> {
     pub fn new(pivots: [usize; P]) -> Self {
         Self {
             root: Box::new(Node::Leaf(LeafNode::new())),
@@ -39,7 +33,7 @@ impl<T, D: Distance<T>, const P: usize> PMTree<T, D, P>
         let possible_split = self.root.insert(o, None, self.pivots, dataset);
         if let Some((o1, n1, o2, n2)) = possible_split {
             // replace the current root with a new one
-            let mut new_root = InnerNode::new(None);
+            let mut new_root = InnerNode::new();
             new_root.do_insert(o1, Box::new(n1), None, self.pivots, dataset);
             new_root.do_insert(o2, Box::new(n2), None, self.pivots, dataset);
             self.root = Box::new(Node::Inner(new_root));
@@ -52,10 +46,19 @@ impl<T, D: Distance<T>, const P: usize> PMTree<T, D, P>
 }
 
 // #[derive(Serialize, Deserialize)]
-#[derive(Default, Debug)]
+#[derive(Debug, Copy, Clone)]
 struct Hyperring {
     min: f64,
     max: f64,
+}
+
+impl Default for Hyperring {
+    fn default() -> Self {
+        Self {
+            min: std::f64::INFINITY,
+            max: 0.0,
+        }
+    }
 }
 
 // #[derive(Serialize, Deserialize)]
@@ -83,6 +86,47 @@ impl<T, D: Distance<T>, const P: usize> Node<T, D, P> {
         }
     }
 
+    fn update_hyperrings_and_radius(
+        &self,
+        router: usize,
+        pivots: [usize; P],
+        hyperrings: &mut [Hyperring; P],
+        dataset: &[T],
+    ) -> f64 {
+        match self {
+            Self::Inner(inner) => inner
+                .children
+                .iter()
+                .take(inner.len)
+                .map(|c| {
+                    c.as_ref()
+                        .unwrap()
+                        .update_hyperrings_and_radius(router, pivots, hyperrings, dataset)
+                })
+                .max_by(|r1, r2| r1.partial_cmp(&r2).unwrap())
+                .unwrap(),
+            Self::Leaf(leaf) => {
+                let mut r = 0.0;
+                for o in leaf.elements {
+                    let d = D::distance(&dataset[o], &dataset[router]);
+                    if d > r {
+                        r = d;
+                    }
+                    for p in 0..P {
+                        let d = D::distance(&dataset[o], &dataset[p]);
+                        if d < hyperrings[p].min {
+                            hyperrings[p].min = d;
+                        }
+                        if d > hyperrings[p].max {
+                            hyperrings[p].max = d;
+                        }
+                    }
+                }
+                r
+            }
+        }
+    }
+
     /// compute the size of this subtree
     fn size(&self) -> usize {
         match self {
@@ -95,76 +139,30 @@ impl<T, D: Distance<T>, const P: usize> Node<T, D, P> {
             Self::Leaf(leaf) => leaf.len,
         }
     }
-
-    fn radii(&self) -> [f64; B] {
-        let mut r = [0.0; B];
-        match self {
-            Node::Inner(inner) => {
-                for i in 0..inner.len {
-                    r[i] = inner.radius[i];
-                }
-            }
-            Node::Leaf(leaf) => {
-                for i in 0..leaf.len {
-                    r[i] = leaf.parent_distance[i].unwrap()
-                }
-            }
-        }
-        r
-    }
-
-    /// Computes an upper bound to the radius of the ball
-    /// centered at the given router, containing all the nodes of the subtree
-    /// rooted at the given node.
-    fn new_radius(&self, router: usize, dataset: &[T]) -> f64 {
-        match self {
-            Node::Inner(inner) => {
-                let mut r = 0.0;
-                for i in 0..inner.len {
-                    let d =
-                        D::distance(&dataset[inner.routers[i]], &dataset[router]) + inner.radius[i];
-                    if d > r {
-                        r = d;
-                    }
-                }
-                r
-            }
-            Node::Leaf(leaf) => {
-                let mut r = 0.0;
-                for i in 0..leaf.len {
-                    let d = D::distance(&dataset[leaf.elements[i]], &dataset[router]);
-                    if d > r {
-                        r = d;
-                    }
-                }
-                r
-            }
-        }
-    }
 }
 
 // #[derive(Serialize, Deserialize)]
 #[derive(Debug)]
 struct InnerNode<T, D: Distance<T>, const P: usize> {
     len: usize,
-    parent: Option<usize>,
     parent_distance: [Option<f64>; B],
     routers: [usize; B],
     radius: [f64; B],
+    hyperrings: [[Hyperring; P]; B],
     children: [Option<Box<Node<T, D, P>>>; B],
     _markert: PhantomData<T>,
     _markerd: PhantomData<D>,
 }
 
 impl<T, D: Distance<T>, const P: usize> InnerNode<T, D, P> {
-    fn new(parent: Option<usize>) -> Self {
+    fn new() -> Self {
         let children: [Option<Box<Node<T, D, P>>>; B] = unsafe { std::mem::transmute([0usize; B]) };
         Self {
             len: 0,
-            parent,
             parent_distance: [None; B],
             routers: [0; B],
             radius: [0.0; B],
+            hyperrings: [[Default::default(); P]; B],
             children,
             _markert: PhantomData,
             _markerd: PhantomData,
@@ -195,17 +193,11 @@ impl<T, D: Distance<T>, const P: usize> InnerNode<T, D, P> {
 
             if let Some((o1, n1, o2, n2)) = possible_split {
                 // replace node `closest` with o1
-                if let Some(parent) = self.parent {
-                    self.parent_distance[closest]
-                        .replace(D::distance(&dataset[o1], &dataset[parent]));
-                }
-                self.routers[closest] = o1;
-                self.children[closest].replace(Box::new(n1));
-                // TODO: update radius
+                self.replace_at(closest, o1, Box::new(n1), parent, pivots, dataset);
 
                 // now, insert the new node directly, if possible, otherwise split the current node
                 if self.len < B {
-                    self.do_insert(o2, Box::new(n2), self.parent, pivots, dataset);
+                    self.do_insert(o2, Box::new(n2), parent, pivots, dataset);
                     None
                 } else {
                     Some(self.split(o2, Box::new(n2), pivots, dataset))
@@ -227,12 +219,27 @@ impl<T, D: Distance<T>, const P: usize> InnerNode<T, D, P> {
         dataset: &[T],
     ) {
         assert!(self.len < B);
-        self.routers[self.len] = o;
-        self.children[self.len].replace(child);
-        self.parent_distance[self.len] =
-            parent.map(|parent| D::distance(&dataset[o], &dataset[parent]));
-        // TODO: update radius
+        self.replace_at(self.len, o, child, parent, pivots, dataset);
         self.len += 1;
+    }
+
+    fn replace_at(
+        &mut self,
+        i: usize,
+        o: usize,
+        child: Box<Node<T, D, P>>,
+        parent: Option<usize>,
+        pivots: [usize; P],
+        dataset: &[T],
+    ) {
+        assert!(i < B);
+        self.routers[i] = o;
+        self.parent_distance[i] =
+            parent.map(|parent| D::distance(&dataset[o], &dataset[parent]));
+        self.hyperrings[i] = [Default::default(); P];
+        let r = child.update_hyperrings_and_radius(o, pivots, &mut self.hyperrings[i], dataset);
+        self.radius[i] = r;
+        self.children[i].replace(child);
     }
 
     fn split(
@@ -246,8 +253,8 @@ impl<T, D: Distance<T>, const P: usize> InnerNode<T, D, P> {
         let o1 = self.routers[0];
         let data1 = &dataset[o1];
         let data2 = &dataset[o2];
-        let mut n1 = Self::new(Some(o1));
-        let mut n2 = Self::new(Some(o2));
+        let mut n1 = Self::new();
+        let mut n2 = Self::new();
 
         n2.do_insert(o2, child, Some(o2), pivots, dataset);
         for i in 0..self.len {
@@ -323,6 +330,9 @@ impl<T, D: Distance<T>, const P: usize> LeafNode<T, D, P> {
         self.parent_distance[self.len] =
             parent.map(|parent| D::distance(&dataset[o], &dataset[parent]));
         self.elements[self.len] = o;
+        for i in 0..P {
+            self.pivot_distances[self.len][i] = D::distance(&dataset[o], &dataset[pivots[i]]);
+        }
         self.len += 1;
     }
 
@@ -378,7 +388,7 @@ mod tests {
     use std::io::prelude::*;
 
     #[test]
-    fn it_works() {
+    fn construction() {
         let dataset = vec![
             vec![-0.479525, -0.0900315],
             vec![1.77065, -2.03216],
@@ -396,10 +406,6 @@ mod tests {
         for i in 0..dataset.len() {
             pm_tree.insert(i, &dataset);
         }
-
-        // let mut f = File::create("tree.json").unwrap();
-        // writeln!(f, "{}", serde_json::to_string_pretty(&pm_tree).unwrap()).unwrap();
-        println!("{:#?}", pm_tree);
 
         assert_eq!(pm_tree.size(), dataset.len());
     }
