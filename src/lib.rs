@@ -2,7 +2,6 @@
 
 use std::marker::PhantomData;
 
-// use serde_derive::{Deserialize, Serialize};
 
 pub trait Distance<T> {
     fn distance(a: &T, b: &T) -> f64;
@@ -264,7 +263,7 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> InnerNode<T, D, B, P> {
         // find the routing element closest
         let closest = (0..self.len)
             .map(|i| {
-                let d = D::distance(&dataset[i], &dataset[o]);
+                let d = D::distance(&dataset[self.routers[i]], &dataset[o]);
                 (i, d)
             })
             .min_by(|p1, p2| p1.1.partial_cmp(&p2.1).unwrap());
@@ -474,6 +473,7 @@ mod tests {
     use crate::{Distance, Euclidean, PMTree};
     use std::fs::File;
     use std::io::prelude::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn construction() {
@@ -534,6 +534,48 @@ mod tests {
     }
 
     #[test]
+    fn range_query_glove25() {
+        use ndarray::s;
+        let f = hdf5::File::open("glove-25.hdf5").unwrap();
+        let data = f.dataset("/train").unwrap();
+        let array = data.read_slice_2d::<f64, _>(s![..10000, ..]).unwrap();
+        let mut dataset = Vec::new();
+        for row in array.rows() {
+            let r = row.as_slice().unwrap();
+            dataset.push(Vec::from(r));
+        }
+    
+        const B: usize = 32;
+        const P: usize = 4;
+        let mut pm_tree = PMTree::<Vec<f64>, Euclidean, B, P>::new([0, 1, 2, 3]);
+        for i in 0..dataset.len() {
+            pm_tree.insert(i, &dataset);
+        }
+        assert_eq!(pm_tree.size(), dataset.len());
+
+        eprintln!("tree built");
+        let mut f = File::create("/tmp/tree.txt").unwrap();
+        writeln!(f, "{:#?}", pm_tree).unwrap();
+
+        let query = &dataset[0];
+        let range = 2.0;
+
+        let mut expected = Vec::new();
+        for (i, v) in dataset.iter().enumerate() {
+            if Euclidean::distance(v, query) <= range {
+                expected.push(i);
+            }
+        }
+
+        let mut res = Vec::new();
+        let cnt_dists = pm_tree.range_query(range, query, &dataset, |i| res.push(i));
+        res.sort();
+        eprintln!("computed {} distances, solution has {} elements, and should have {}", cnt_dists, res.len(), expected.len());
+
+        assert_eq!(expected, res);
+    }
+
+    #[test]
     fn range_query() {
         let dataset = vec![
             vec![-0.479525, -0.0900315],
@@ -552,10 +594,6 @@ mod tests {
         for i in 0..dataset.len() {
             pm_tree.insert(i, &dataset);
         }
-
-        let mut f = File::create("tree.txt").unwrap();
-        writeln!(f, "{:#?}", pm_tree).unwrap();
-        drop(f);
 
         let query = &dataset[0];
         let range = 0.2;
