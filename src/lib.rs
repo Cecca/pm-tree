@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 
 // use serde_derive::{Deserialize, Serialize};
 
-const B: usize = 128;
+const B: usize = 2;
 
 pub trait Distance<T> {
     fn distance(a: &T, b: &T) -> f64;
@@ -131,13 +131,13 @@ impl<T, D: Distance<T>, const P: usize> Node<T, D, P> {
                 .unwrap(),
             Self::Leaf(leaf) => {
                 let mut r = 0.0;
-                for o in leaf.elements {
+                for &o in leaf.elements.iter().take(leaf.len) {
                     let d = D::distance(&dataset[o], &dataset[router]);
                     if d > r {
                         r = d;
                     }
                     for p in 0..P {
-                        let d = D::distance(&dataset[o], &dataset[p]);
+                        let d = D::distance(&dataset[o], &dataset[pivots[p]]);
                         if d < hyperrings[p].min {
                             hyperrings[p].min = d;
                         }
@@ -189,16 +189,12 @@ impl<T, D: Distance<T>, const P: usize> Node<T, D, P> {
             Self::Inner(inner) => {
                 let mut dists = 0;
                 for i in 0..inner.len {
-                    dbg!(&inner.hyperrings[i]);
                     if inner.hyperrings[i]
                         .iter()
                         .zip(&q_pivot_dists)
-                        .all(|(hr, qd)| dbg!(qd - range) <= hr.max && dbg!(qd + range) >= hr.min)
+                        .all(|(hr, qd)| qd - range <= hr.max && qd + range >= hr.min)
+                        && D::distance(q, &dataset[inner.routers[i]]) <= inner.radius[i] + range
                     {
-                        eprintln!(
-                            "descending in child {}, centered at {}",
-                            i, inner.routers[i]
-                        );
                         dists += inner.children[i].as_ref().unwrap().range_query(
                             range,
                             q,
@@ -206,8 +202,6 @@ impl<T, D: Distance<T>, const P: usize> Node<T, D, P> {
                             dataset,
                             callback,
                         );
-                    } else {
-                        eprintln!("Skipping child {}, centered at {}", i, inner.routers[i]);
                     }
                 }
                 dists
@@ -469,7 +463,11 @@ pub struct Euclidean;
 impl Distance<Vec<f64>> for Euclidean {
     fn distance(a: &Vec<f64>, b: &Vec<f64>) -> f64 {
         assert!(a.len() == b.len());
-        a.iter().zip(b.iter()).map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt()
+        a.iter()
+            .zip(b.iter())
+            .map(|(a, b)| (a - b).powi(2))
+            .sum::<f64>()
+            .sqrt()
     }
 }
 
@@ -535,7 +533,6 @@ mod tests {
                 assert_eq!(actual_dists, leaf.pivot_distances[i]);
             }
         })
-
     }
 
     #[test]
