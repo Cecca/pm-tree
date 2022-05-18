@@ -2,7 +2,6 @@
 
 use std::marker::PhantomData;
 
-
 pub trait Distance<T> {
     fn distance(a: &T, b: &T) -> f64;
 }
@@ -26,6 +25,38 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> PMTree<T, D, B, P> {
         }
     }
 
+    pub fn for_dataset(dataset: &[T], seed: u64) -> Self {
+        use rand::distributions::Uniform;
+        use rand::prelude::*;
+        use rand_xoshiro::Xoshiro256PlusPlus;
+        // Pivot selection: As in the original paper, we take several random samples, and
+        // select the one with the maximum sum of pairwise distances
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
+        let distr = Uniform::new(0usize, dataset.len());
+        let (_diversity, pivots) = (0..100)
+            .map(|_| {
+                let mut cands = [0; P];
+                for i in 0..P {
+                    cands[i] = distr.sample(&mut rng);
+                }
+                let mut diversity = 0.0;
+                for i in 0..P {
+                    for j in (i + 1)..P {
+                        diversity += D::distance(&dataset[cands[i]], &dataset[cands[j]]);
+                    }
+                }
+                (diversity, cands)
+            })
+            .max_by(|p1, p2| p1.0.partial_cmp(&p2.0).unwrap())
+            .unwrap();
+
+        let mut tree = Self::new(pivots);
+        for i in 0..dataset.len() {
+            tree.insert(i, dataset);
+        }
+        tree
+    }
+
     pub fn insert(&mut self, o: usize, dataset: &[T]) {
         let possible_split = self.root.insert(o, None, self.pivots, dataset);
         if let Some((o1, n1, o2, n2)) = possible_split {
@@ -39,6 +70,10 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> PMTree<T, D, B, P> {
 
     pub fn size(&self) -> usize {
         self.root.size()
+    }
+
+    pub fn height(&self) -> usize {
+        self.root.height()
     }
 
     /// Run the given range query and return the count of distance computations
@@ -104,6 +139,21 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> Node<T, D, B, P> {
             Node::Leaf(leaf) => leaf
                 .insert(o, parent, pivots, dataset)
                 .map(|(o1, n1, o2, n2)| (o1, Self::Leaf(n1), o2, Self::Leaf(n2))),
+        }
+    }
+
+    fn height(&self) -> usize {
+        match self {
+            Self::Leaf(_) => 1,
+            Self::Inner(inner) => {
+                1 + inner
+                    .children
+                    .iter()
+                    .take(inner.len)
+                    .map(|c| c.as_ref().unwrap().height())
+                    .max()
+                    .unwrap()
+            }
         }
     }
 
@@ -240,7 +290,8 @@ struct InnerNode<T, D: Distance<T>, const B: usize, const P: usize> {
 
 impl<T, D: Distance<T>, const B: usize, const P: usize> InnerNode<T, D, B, P> {
     fn new() -> Self {
-        let children: [Option<Box<Node<T, D, B, P>>>; B] = unsafe { std::mem::transmute_copy(&[0usize; B]) };
+        let children: [Option<Box<Node<T, D, B, P>>>; B] =
+            unsafe { std::mem::transmute_copy(&[0usize; B]) };
         Self {
             len: 0,
             parent_distance: [None; B],
@@ -471,9 +522,9 @@ impl Distance<Vec<f64>> for Euclidean {
 #[cfg(test)]
 mod tests {
     use crate::{Distance, Euclidean, PMTree};
+    use pretty_assertions::assert_eq;
     use std::fs::File;
     use std::io::prelude::*;
-    use pretty_assertions::assert_eq;
 
     #[test]
     fn construction() {
@@ -544,16 +595,13 @@ mod tests {
             let r = row.as_slice().unwrap();
             dataset.push(Vec::from(r));
         }
-    
+
         const B: usize = 32;
         const P: usize = 4;
-        let mut pm_tree = PMTree::<Vec<f64>, Euclidean, B, P>::new([0, 1, 2, 3]);
-        for i in 0..dataset.len() {
-            pm_tree.insert(i, &dataset);
-        }
+        let pm_tree = PMTree::<Vec<f64>, Euclidean, B, P>::for_dataset(&dataset, 1234);
         assert_eq!(pm_tree.size(), dataset.len());
 
-        eprintln!("tree built");
+        eprintln!("tree built, with height {}", pm_tree.height());
         let mut f = File::create("/tmp/tree.txt").unwrap();
         writeln!(f, "{:#?}", pm_tree).unwrap();
 
@@ -570,7 +618,12 @@ mod tests {
         let mut res = Vec::new();
         let cnt_dists = pm_tree.range_query(range, query, &dataset, |i| res.push(i));
         res.sort();
-        eprintln!("computed {} distances, solution has {} elements, and should have {}", cnt_dists, res.len(), expected.len());
+        eprintln!(
+            "computed {} distances, solution has {} elements, and should have {}",
+            cnt_dists,
+            res.len(),
+            expected.len()
+        );
 
         assert_eq!(expected, res);
     }
