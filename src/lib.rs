@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 
 // use serde_derive::{Deserialize, Serialize};
 
-const B: usize = 2;
+const B: usize = 128;
 
 pub trait Distance<T> {
     fn distance(a: &T, b: &T) -> f64;
@@ -42,6 +42,30 @@ impl<T, D: Distance<T>, const P: usize> PMTree<T, D, P> {
 
     pub fn size(&self) -> usize {
         self.root.size()
+    }
+
+    /// Run the given range query and return the count of distance computations
+    pub fn range_query<F: FnMut(usize)>(
+        &self,
+        range: f64,
+        q: &T,
+        dataset: &[T],
+        mut callback: F,
+    ) -> usize {
+        let mut cnt_dists = P;
+        let mut q_pivot_dists = [0.0; P];
+        for i in 0..P {
+            q_pivot_dists[i] = D::distance(q, &dataset[self.pivots[i]]);
+        }
+        cnt_dists += self
+            .root
+            .range_query(range, q, q_pivot_dists, dataset, &mut callback);
+        cnt_dists
+    }
+
+    #[cfg(test)]
+    fn for_each_leaf<F: FnMut(&LeafNode<T, D, P>)>(&self, mut callback: F) {
+        self.root.for_each_leaf(&mut callback);
     }
 }
 
@@ -127,6 +151,18 @@ impl<T, D: Distance<T>, const P: usize> Node<T, D, P> {
         }
     }
 
+    #[cfg(test)]
+    fn for_each_leaf<F: FnMut(&LeafNode<T, D, P>)>(&self, callback: &mut F) {
+        match self {
+            Self::Leaf(leaf) => callback(leaf),
+            Self::Inner(inner) => inner
+                .children
+                .iter()
+                .take(inner.len)
+                .for_each(|c| c.as_ref().unwrap().for_each_leaf(callback)),
+        }
+    }
+
     /// compute the size of this subtree
     fn size(&self) -> usize {
         match self {
@@ -137,6 +173,63 @@ impl<T, D: Distance<T>, const P: usize> Node<T, D, P> {
                 .map(|c| c.as_ref().unwrap().size())
                 .sum(),
             Self::Leaf(leaf) => leaf.len,
+        }
+    }
+
+    /// performs a range query, and return the number of distances computed
+    fn range_query<F: FnMut(usize)>(
+        &self,
+        range: f64,
+        q: &T,
+        q_pivot_dists: [f64; P],
+        dataset: &[T],
+        callback: &mut F,
+    ) -> usize {
+        match self {
+            Self::Inner(inner) => {
+                let mut dists = 0;
+                for i in 0..inner.len {
+                    dbg!(&inner.hyperrings[i]);
+                    if inner.hyperrings[i]
+                        .iter()
+                        .zip(&q_pivot_dists)
+                        .all(|(hr, qd)| dbg!(qd - range) <= hr.max && dbg!(qd + range) >= hr.min)
+                    {
+                        eprintln!(
+                            "descending in child {}, centered at {}",
+                            i, inner.routers[i]
+                        );
+                        dists += inner.children[i].as_ref().unwrap().range_query(
+                            range,
+                            q,
+                            q_pivot_dists,
+                            dataset,
+                            callback,
+                        );
+                    } else {
+                        eprintln!("Skipping child {}, centered at {}", i, inner.routers[i]);
+                    }
+                }
+                dists
+            }
+            Self::Leaf(leaf) => {
+                let mut dists = 0;
+                for i in 0..leaf.len {
+                    // use the triangle inequality with the pivots to compute lower bounds to the
+                    // distance between the query and the point, discarding the ones that are too far away
+                    if leaf.pivot_distances[i]
+                        .iter()
+                        .zip(q_pivot_dists.iter())
+                        .all(|(pd, qd)| (pd - qd).abs() <= range)
+                    {
+                        dists += 1;
+                        if D::distance(q, &dataset[leaf.elements[i]]) <= range {
+                            callback(leaf.elements[i]);
+                        }
+                    }
+                }
+                dists
+            }
         }
     }
 }
@@ -234,8 +327,7 @@ impl<T, D: Distance<T>, const P: usize> InnerNode<T, D, P> {
     ) {
         assert!(i < B);
         self.routers[i] = o;
-        self.parent_distance[i] =
-            parent.map(|parent| D::distance(&dataset[o], &dataset[parent]));
+        self.parent_distance[i] = parent.map(|parent| D::distance(&dataset[o], &dataset[parent]));
         self.hyperrings[i] = [Default::default(); P];
         let r = child.update_hyperrings_and_radius(o, pivots, &mut self.hyperrings[i], dataset);
         self.radius[i] = r;
@@ -377,13 +469,13 @@ pub struct Euclidean;
 impl Distance<Vec<f64>> for Euclidean {
     fn distance(a: &Vec<f64>, b: &Vec<f64>) -> f64 {
         assert!(a.len() == b.len());
-        a.iter().zip(b.iter()).map(|(a, b)| (a - b).powi(2)).sum()
+        a.iter().zip(b.iter()).map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{Euclidean, PMTree};
+    use crate::{Distance, Euclidean, PMTree};
     use std::fs::File;
     use std::io::prelude::*;
 
@@ -408,5 +500,83 @@ mod tests {
         }
 
         assert_eq!(pm_tree.size(), dataset.len());
+    }
+
+    #[test]
+    fn pivot_distances() {
+        let dataset = vec![
+            vec![-0.479525, -0.0900315],
+            vec![1.77065, -2.03216],
+            vec![-0.709144, -0.469802],
+            vec![1.90905, -1.91834],
+            vec![-0.355722, 1.64757],
+            vec![-0.658588, 0.490459],
+            vec![0.738724, -0.432818],
+            vec![2.21156, 1.1524],
+            vec![0.959106, -1.03304],
+            vec![-0.543183, 0.201419],
+        ];
+
+        const P: usize = 3;
+        let pivots = [1, 3, 8];
+        let mut pm_tree = PMTree::<_, Euclidean, P>::new(pivots);
+        for i in 0..dataset.len() {
+            pm_tree.insert(i, &dataset);
+        }
+
+        pm_tree.for_each_leaf(|leaf| {
+            for i in 0..leaf.len {
+                let x = &dataset[leaf.elements[i]];
+                let mut actual_dists = [0.0; P];
+                for j in 0..P {
+                    let pivot = &dataset[pivots[j]];
+                    actual_dists[j] = Euclidean::distance(x, pivot);
+                }
+                assert_eq!(actual_dists, leaf.pivot_distances[i]);
+            }
+        })
+
+    }
+
+    #[test]
+    fn range_query() {
+        let dataset = vec![
+            vec![-0.479525, -0.0900315],
+            vec![1.77065, -2.03216],
+            vec![-0.709144, -0.469802],
+            vec![1.90905, -1.91834],
+            vec![-0.355722, 1.64757],
+            vec![-0.658588, 0.490459],
+            vec![0.738724, -0.432818],
+            vec![2.21156, 1.1524],
+            vec![0.959106, -1.03304],
+            vec![-0.543183, 0.201419],
+        ];
+
+        let mut pm_tree = PMTree::<_, Euclidean, 3>::new([1, 3, 8]);
+        for i in 0..dataset.len() {
+            pm_tree.insert(i, &dataset);
+        }
+
+        let mut f = File::create("tree.txt").unwrap();
+        writeln!(f, "{:#?}", pm_tree).unwrap();
+        drop(f);
+
+        let query = &dataset[0];
+        let range = 0.2;
+
+        let mut expected = Vec::new();
+        for (i, v) in dataset.iter().enumerate() {
+            if Euclidean::distance(v, query) <= range {
+                expected.push(i);
+            }
+        }
+
+        let mut res = Vec::new();
+        let cnt_dists = pm_tree.range_query(range, query, &dataset, |i| res.push(i));
+        res.sort();
+        eprintln!("computed {cnt_dists} distances");
+
+        assert_eq!(expected, res);
     }
 }
