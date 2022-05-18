@@ -11,16 +11,24 @@ pub trait Distance<T> {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct PMTree<T, D: Distance<T>> {
+pub struct PMTree<T, D: Distance<T>, const B: usize, const P: usize>
+where
+    for<'d> [usize; P]: serde::Serialize + serde::Deserialize<'d>,
+{
     root: Box<Node<T, D>>,
+    pivots: [usize; P],
     _markert: PhantomData<T>,
     _markerd: PhantomData<D>,
 }
 
-impl<T, D: Distance<T>> PMTree<T, D> {
-    pub fn new() -> Self {
+impl<T, D: Distance<T>, const B: usize, const P: usize> PMTree<T, D, B, P>
+where
+    for<'d> [usize; P]: serde::Serialize + serde::Deserialize<'d>,
+{
+    pub fn new(pivots: [usize; P]) -> Self {
         Self {
             root: Box::new(Node::Leaf(LeafNode::new())),
+            pivots,
             _markert: PhantomData,
             _markerd: PhantomData,
         }
@@ -40,6 +48,12 @@ impl<T, D: Distance<T>> PMTree<T, D> {
     pub fn size(&self) -> usize {
         self.root.size()
     }
+}
+
+#[derive(Serialize, Deserialize)]
+struct Hyperring {
+    min: f64,
+    max: f64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -358,7 +372,7 @@ mod tests {
             vec![-0.543183, 0.201419],
         ];
 
-        let mut pm_tree = PMTree::<_, Euclidean>::new();
+        let mut pm_tree = PMTree::<_, Euclidean, 3>::new([1, 3, 8]);
         for i in 0..dataset.len() {
             pm_tree.insert(i, &dataset);
         }
