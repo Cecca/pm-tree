@@ -36,15 +36,13 @@ enum Node {
 }
 
 impl Node {
-    fn insert<T, D>(
+    fn insert<T>(
         &mut self,
         o: usize,
         parent: Option<usize>,
         dataset: &[T],
-        dist: D,
+        dist: impl Fn(&T, &T) -> f64,
     ) -> Option<(usize, Self, usize, Self)>
-    where
-        D: Fn(&T, &T) -> f64,
     {
         match self {
             Node::Inner(inner) => inner
