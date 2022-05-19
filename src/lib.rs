@@ -1,4 +1,8 @@
-#![feature(drain_filter, new_uninit, maybe_uninit_uninit_array)]
+#![feature(
+    drain_filter,
+    new_uninit,
+    maybe_uninit_uninit_array
+)]
 
 use std::marker::PhantomData;
 
@@ -236,6 +240,7 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> Node<T, D, B, P> {
             Self::Inner(inner) => {
                 let mut dists = 0;
                 for i in 0..inner.len {
+                    dists += 1;
                     if inner.hyperrings[i]
                         .iter()
                         .zip(&q_pivot_dists)
@@ -273,6 +278,38 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> Node<T, D, B, P> {
             }
         }
     }
+}
+
+fn promote<T, D: Distance<T>>(
+    o: usize,
+    os: &[usize],
+    dataset: &[T],
+) -> (usize, usize)
+{
+    // assert!(os.len() <= B);
+    // // Pre-compute the pairwise distances
+    // let mut distmatrix = [[std::f64::INFINITY; B + 1]; B + 1];
+    // for i in 0..os.len() {
+    //     for j in (i + 1)..os.len() {
+    //         let d = D::distance(&dataset[os[i]], &dataset[os[j]]);
+    //         distmatrix[i][j] = d;
+    //         distmatrix[j][i] = d;
+    //     }
+    // }
+    // for j in 0..os.len() {
+    //     let d = D::distance(&dataset[o], &dataset[os[j]]);
+    //     distmatrix[j][B] = d;
+    //     distmatrix[B][j] = d;
+    // }
+
+    // // Compute how clusters would split
+    // let mut radii_sums = [[std::f64::INFINITY; B+1]; B+1];
+    // for i in 0..os.len() {
+    //     for j in 0..os.len() {
+    //         // os[i], os[j] is a pair
+    //     }
+    // }
+    (o, os[0])
 }
 
 // #[derive(Serialize, Deserialize)]
@@ -378,19 +415,23 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> InnerNode<T, D, B, P> {
 
     fn split(
         &mut self,
-        o2: usize,
+        o: usize,
         child: Box<Node<T, D, B, P>>,
         pivots: [usize; P],
         dataset: &[T],
     ) -> (usize, Self, usize, Self) {
         assert!(self.len == B);
-        let o1 = self.routers[0];
+        let (o1, o2) = promote::<_, D>(o, &self.routers[..self.len], dataset);
         let data1 = &dataset[o1];
         let data2 = &dataset[o2];
         let mut n1 = Self::new();
         let mut n2 = Self::new();
 
-        n2.do_insert(o2, child, Some(o2), pivots, dataset);
+        if D::distance(&dataset[o], data1) < D::distance(&dataset[o], data2) {
+            n1.do_insert(o, child, Some(o1), pivots, dataset);
+        } else {
+            n2.do_insert(o, child, Some(o2), pivots, dataset);
+        }
         for i in 0..self.len {
             if D::distance(&dataset[self.routers[i]], data1)
                 < D::distance(&dataset[self.routers[i]], data2)
@@ -471,20 +512,19 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> LeafNode<T, D, B, P> {
     }
 
     /// Split the current node, leaving it empty, and returns two new nodes with the corresponding routing points
-    fn split(
-        &mut self,
-        o2: usize,
-        pivots: [usize; P],
-        dataset: &[T],
-    ) -> (usize, Self, usize, Self) {
+    fn split(&mut self, o: usize, pivots: [usize; P], dataset: &[T]) -> (usize, Self, usize, Self) {
         assert!(self.len == B);
-        let o1 = self.elements[0];
+        let (o1, o2) = promote::<_, D>(o, &self.elements[..self.len], dataset);
         let data1 = &dataset[o1];
         let data2 = &dataset[o2];
         let mut n1 = Self::new();
         let mut n2 = Self::new();
 
-        n2.insert(o2, Some(o2), pivots, dataset);
+        if D::distance(&dataset[o], data1) < D::distance(&dataset[o], data2) {
+            n1.do_insert(o, Some(o1), pivots, dataset);
+        } else {
+            n2.do_insert(o, Some(o2), pivots, dataset);
+        }
         for i in 0..self.len {
             let d1 = D::distance(&dataset[self.elements[i]], data1);
             let d2 = D::distance(&dataset[self.elements[i]], data2);
@@ -525,6 +565,7 @@ mod tests {
     use pretty_assertions::assert_eq;
     use std::fs::File;
     use std::io::prelude::*;
+    use std::time::Instant;
 
     #[test]
     fn construction() {
@@ -597,26 +638,31 @@ mod tests {
         }
 
         const B: usize = 32;
-        const P: usize = 4;
+        const P: usize = 8;
+        let t_build = Instant::now();
         let pm_tree = PMTree::<Vec<f64>, Euclidean, B, P>::for_dataset(&dataset, 1234);
         assert_eq!(pm_tree.size(), dataset.len());
 
-        eprintln!("tree built, with height {}", pm_tree.height());
+        eprintln!("tree built in {:?}, with height {}", t_build.elapsed(), pm_tree.height());
         let mut f = File::create("/tmp/tree.txt").unwrap();
         writeln!(f, "{:#?}", pm_tree).unwrap();
 
         let query = &dataset[0];
         let range = 2.0;
 
+        let t_baseline = Instant::now();
         let mut expected = Vec::new();
         for (i, v) in dataset.iter().enumerate() {
             if Euclidean::distance(v, query) <= range {
                 expected.push(i);
             }
         }
+        eprintln!("Time for linear scan {:?}", t_baseline.elapsed());
 
+        let t_tree = Instant::now();
         let mut res = Vec::new();
         let cnt_dists = pm_tree.range_query(range, query, &dataset, |i| res.push(i));
+        eprintln!("Time for tree {:?}", t_tree.elapsed());
         res.sort();
         eprintln!(
             "computed {} distances, solution has {} elements, and should have {}",
@@ -665,4 +711,5 @@ mod tests {
 
         assert_eq!(expected, res);
     }
+
 }

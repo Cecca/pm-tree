@@ -13,3 +13,8 @@ rand_xoshiro = "0.6"
 hdf5 = "0.8"
 ndarray = "0.15"
 pretty_assertions = "1.2"
+criterion = "0.3"
+
+[[bench]]
+name = "benchmarks"
+harness = false
