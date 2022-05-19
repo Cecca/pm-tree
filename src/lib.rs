@@ -1,5 +1,7 @@
 #![feature(drain_filter, new_uninit, maybe_uninit_uninit_array)]
 
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::fmt::Debug;
 use std::marker::PhantomData;
 
@@ -96,7 +98,141 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> PMTree<T, D, B, P> {
         cnt_dists
     }
 
-    #[cfg(test)]
+    pub fn closest_pairs(&self, k: usize, dataset: &[T]) -> Vec<(f64, usize, usize)> {
+        let mut result: BinaryHeap<(OrdF64, usize, usize)> = BinaryHeap::new();
+
+        // init the result with self-joins of the leaves
+        self.for_each_leaf(|leaf: &LeafNode<T, D, B, P>| {
+            for i in 0..leaf.len {
+                for j in (i + 1)..leaf.len {
+                    let a = leaf.elements[i];
+                    let b = leaf.elements[j];
+                    let d = D::distance(&dataset[a], &dataset[b]);
+                    result.push((OrdF64(d), a, b));
+                    if result.len() > k {
+                        result.pop();
+                    }
+                }
+            }
+        });
+
+        assert!(result.len() == k);
+
+        match self.root.as_ref() {
+            Node::Leaf(_leaf) => (), // do nothing in this case
+            Node::Inner(inner) => {
+                let mut pq: BinaryHeap<NodePair<T, D, B, P>> = BinaryHeap::new();
+                // initialize with the direct children of the root
+                for i in 0..inner.len {
+                    for j in i..inner.len {
+                        let a = inner.routers[i];
+                        let b = inner.routers[j];
+                        let radius_a = inner.radius[i];
+                        let radius_b = inner.radius[j];
+                        let d = D::distance(&dataset[a], &dataset[b]);
+                        // TODO: include in mindist also the pivot based lower bounds
+                        let mindist = d - radius_a - radius_b;
+                        pq.push(NodePair::new(
+                            1,
+                            mindist,
+                            a,
+                            &inner.children[i].as_ref().unwrap(),
+                            b,
+                            &inner.children[j].as_ref().unwrap(),
+                        ));
+                    }
+                }
+
+                while let Some(node_pair) = pq.pop() {
+                    assert!(result.len() == k);
+                    if OrdF64(node_pair.mindist) > result.peek().unwrap().0 {
+                        // early stop
+                        break;
+                    }
+
+                    if node_pair.a == node_pair.b {
+                        // self join case
+                        match node_pair.anode.as_ref() {
+                            Node::Leaf(_leaf) => {
+                                // the self join of a leaf can be skipped, since we already did it in the initialization phase
+                            }
+                            Node::Inner(inner) => {
+                                for i in 0..inner.len {
+                                    for j in i..inner.len {
+                                        let a = inner.routers[i];
+                                        let b = inner.routers[j];
+                                        let radius_a = inner.radius[i];
+                                        let radius_b = inner.radius[j];
+                                        let d = D::distance(&dataset[a], &dataset[b]);
+                                        // TODO: include in mindist also the pivot based lower bounds
+                                        let mindist = d - radius_a - radius_b;
+                                        pq.push(NodePair::new(
+                                            node_pair.level + 1,
+                                            mindist,
+                                            a,
+                                            &inner.children[i].as_ref().unwrap(),
+                                            b,
+                                            &inner.children[j].as_ref().unwrap(),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // join of two different nodes
+                        match (node_pair.anode.as_ref(), node_pair.bnode.as_ref()) {
+                            (Node::Leaf(l1), Node::Leaf(l2)) => {
+                                println!(
+                                    "leaves: {:?} and {:?}",
+                                    &l1.elements[..l1.len],
+                                    &l2.elements[..l2.len]
+                                );
+                                for &a in &l1.elements[..l1.len] {
+                                    for &b in &l2.elements[..l2.len] {
+                                        let d = D::distance(&dataset[a], &dataset[b]);
+                                        result.push((OrdF64(d), a, b));
+                                        if result.len() > k {
+                                            result.pop();
+                                        }
+                                    }
+                                }
+                            }
+                            (Node::Inner(n1), Node::Inner(n2)) => {
+                                for i in 0..n1.len {
+                                    for j in 0..n2.len {
+                                        let a = n1.routers[i];
+                                        let b = n2.routers[j];
+                                        let radius_a = n1.radius[i];
+                                        let radius_b = n2.radius[j];
+                                        let d = D::distance(&dataset[a], &dataset[b]);
+                                        // TODO: include in mindist also the pivot based lower bounds
+                                        let mindist = d - radius_a - radius_b;
+                                        pq.push(NodePair::new(
+                                            node_pair.level + 1,
+                                            mindist,
+                                            a,
+                                            &n1.children[i].as_ref().unwrap(),
+                                            b,
+                                            &n2.children[j].as_ref().unwrap(),
+                                        ));
+                                    }
+                                }
+                            }
+                            _ => panic!("leaves should all be at the same level!"),
+                        }
+                    }
+                }
+            }
+        }
+
+        result
+            .into_sorted_vec()
+            .into_iter()
+            .take(k)
+            .map(|(d, a, b)| (d.0, std::cmp::min(a, b), std::cmp::max(a, b)))
+            .collect()
+    }
+
     fn for_each_leaf<F: FnMut(&LeafNode<T, D, B, P>)>(&self, mut callback: F) {
         self.root.for_each_leaf(&mut callback);
     }
@@ -104,6 +240,73 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> PMTree<T, D, B, P> {
     #[cfg(test)]
     fn for_node_in_path<F: FnMut(&Node<T, D, B, P>)>(&self, id: usize, mut callback: F) {
         self.root.for_node_in_path(id, &mut callback);
+    }
+}
+
+struct NodePair<'tree, T, D: Distance<T>, const B: usize, const P: usize> {
+    level: usize,
+    mindist: f64,
+    a: usize,
+    anode: &'tree Box<Node<T, D, B, P>>,
+    b: usize,
+    bnode: &'tree Box<Node<T, D, B, P>>,
+}
+
+impl<'tree, T, D: Distance<T>, const B: usize, const P: usize> NodePair<'tree, T, D, B, P> {
+    fn new(
+        level: usize,
+        mindist: f64,
+        a: usize,
+        anode: &'tree Box<Node<T, D, B, P>>,
+        b: usize,
+        bnode: &'tree Box<Node<T, D, B, P>>,
+    ) -> Self {
+        let mindist = if mindist < 0.0 { 0.0 } else { mindist };
+        if a < b {
+            Self {
+                level,
+                mindist,
+                a,
+                anode,
+                b,
+                bnode,
+            }
+        } else {
+            Self {
+                level,
+                mindist,
+                a: b,
+                anode: bnode,
+                b: a,
+                bnode: anode,
+            }
+        }
+    }
+}
+
+impl<'tree, T, D: Distance<T>, const B: usize, const P: usize> Eq for NodePair<'tree, T, D, B, P> {}
+
+impl<'tree, T, D: Distance<T>, const B: usize, const P: usize> PartialEq
+    for NodePair<'tree, T, D, B, P>
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.mindist == other.mindist && self.level == other.level
+    }
+}
+
+impl<'tree, T, D: Distance<T>, const B: usize, const P: usize> PartialOrd
+    for NodePair<'tree, T, D, B, P>
+{
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.mindist
+            .partial_cmp(&other.mindist)
+            .map(|o| o.reverse().then(self.level.cmp(&other.level)))
+    }
+}
+
+impl<'tree, T, D: Distance<T>, const B: usize, const P: usize> Ord for NodePair<'tree, T, D, B, P> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.partial_cmp(other).unwrap()
     }
 }
 
@@ -204,7 +407,6 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> Node<T, D, B, P> {
         }
     }
 
-    #[cfg(test)]
     fn for_each_leaf<F: FnMut(&LeafNode<T, D, B, P>)>(&self, callback: &mut F) {
         match self {
             Self::Leaf(leaf) => callback(leaf),
@@ -441,7 +643,10 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> InnerNode<T, D, B, P> {
         self.parent_distance[i] = parent.map(|parent| D::distance(&dataset[o], &dataset[parent]));
         self.hyperrings[i] = [Default::default(); P];
         self.children[i].replace(child);
-        let r = self.children[i].as_mut().unwrap().update_hyperrings_and_radius(o, pivots, &mut self.hyperrings[i], dataset);
+        let r = self.children[i]
+            .as_mut()
+            .unwrap()
+            .update_hyperrings_and_radius(o, pivots, &mut self.hyperrings[i], dataset);
         self.radius[i] = r;
     }
 
@@ -502,16 +707,16 @@ where
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InnerNode")
             .field("len", &self.len)
-            .field(
-                "parent_distance",
-                &format_args!("{:?}", &self.parent_distance[..self.len]),
-            )
             .field("routers", &format_args!("{:?}", &self.routers[..self.len]))
-            .field("radius", &format_args!("{:?}", &self.radius[..self.len]))
-            .field(
-                "hyperrings",
-                &format_args!("{:?}", &self.hyperrings[..self.len]),
-            )
+            // .field(
+            //     "parent_distance",
+            //     &format_args!("{:?}", &self.parent_distance[..self.len]),
+            // )
+            // .field("radius", &format_args!("{:?}", &self.radius[..self.len]))
+            // .field(
+            //     "hyperrings",
+            //     &format_args!("{:?}", &self.hyperrings[..self.len]),
+            // )
             // .field("children", &format_args!("{:?}", &self.children[..self.len]))
             .finish()
     }
@@ -606,18 +811,40 @@ where
         f.debug_struct("LeafNode")
             .field("len", &self.len)
             .field(
-                "parent_distance",
-                &format_args!("{:?}", &self.parent_distance[..self.len]),
-            )
-            .field(
-                "pivot_distances",
-                &format_args!("{:?}", &self.pivot_distances[..self.len]),
-            )
-            .field(
                 "elements",
                 &format_args!("{:?}", &self.elements[..self.len]),
             )
+            // .field(
+            //     "parent_distance",
+            //     &format_args!("{:?}", &self.parent_distance[..self.len]),
+            // )
+            // .field(
+            //     "pivot_distances",
+            //     &format_args!("{:?}", &self.pivot_distances[..self.len]),
+            // )
             .finish()
+    }
+}
+
+struct OrdF64(f64);
+
+impl PartialEq for OrdF64 {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl Eq for OrdF64 {}
+
+impl PartialOrd for OrdF64 {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.0.partial_cmp(&other.0)
+    }
+}
+
+impl Ord for OrdF64 {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.partial_cmp(other).unwrap()
     }
 }
 
@@ -875,5 +1102,53 @@ mod tests {
         eprintln!("computed {cnt_dists} distances");
 
         assert_eq!(expected, res);
+    }
+
+    #[test]
+    fn range_closest_pairs() {
+        let dataset = vec![
+            vec![-0.479525, -0.0900315],
+            vec![1.77065, -2.03216],
+            vec![-0.709144, -0.469802],
+            vec![1.90905, -1.91834],
+            vec![-0.355722, 1.64757],
+            vec![-0.658588, 0.490459],
+            vec![0.738724, -0.432818],
+            vec![2.21156, 1.1524],
+            vec![0.959106, -1.03304],
+            vec![-0.543183, 0.201419],
+        ];
+
+        let mut pm_tree = PMTree::<_, Euclidean, 2, 3>::new([1, 3, 8]);
+        for i in 0..dataset.len() {
+            pm_tree.insert(i, &dataset);
+        }
+        pm_tree.for_node_in_path(5, |node| println!("{:?}", node));
+        pm_tree.for_node_in_path(9, |node| println!("{:?}", node));
+
+        let k = 4;
+        let mut expected = BinaryHeap::new();
+
+        for i in 0..dataset.len() {
+            for j in (i + 1)..dataset.len() {
+                let a = &dataset[i];
+                let b = &dataset[j];
+                let d = OrdF64(Euclidean::distance(a, b));
+                expected.push((d, i, j));
+                if expected.len() > k {
+                    expected.pop();
+                }
+            }
+        }
+        let expected: Vec<(f64, usize, usize)> = expected
+            .into_sorted_vec()
+            .into_iter()
+            .map(|(d, a, b)| (d.0, a, b))
+            .collect();
+        dbg!(&expected);
+
+        let actual = pm_tree.closest_pairs(k, &dataset);
+
+        assert_eq!(expected, actual);
     }
 }
