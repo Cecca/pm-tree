@@ -22,7 +22,7 @@ fn bench_glove25(c: &mut Criterion) {
     use ndarray::s;
     let f = hdf5::File::open("glove-25.hdf5").unwrap();
     let data = f.dataset("/train").unwrap();
-    let array = data.read_slice_2d::<f64, _>(s![..10000, ..]).unwrap();
+    let array = data.read_slice_2d::<f64, _>(s![..100000, ..]).unwrap();
     let mut dataset = Vec::new();
     for row in array.rows() {
         let r = row.as_slice().unwrap();
@@ -31,13 +31,14 @@ fn bench_glove25(c: &mut Criterion) {
 
     {
         let mut group = c.benchmark_group("tree construction");
-        bench_builder!(group, 2, 8, dataset);
+        group.sample_size(10);
         bench_builder!(group, 32, 8, dataset);
         bench_builder!(group, 64, 8, dataset);
     }
 
     {
         let mut group = c.benchmark_group("range query");
+        group.sample_size(10);
         bench_range_query!(group, 32, 4, dataset, 0, 2.0);
         bench_range_query!(group, 64, 4, dataset, 0, 2.0);
         bench_range_query!(group, 32, 8, dataset, 0, 2.0);
