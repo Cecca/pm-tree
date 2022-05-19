@@ -974,54 +974,6 @@ mod tests {
                 q_pivot_dists[i] = Euclidean::distance(query, &$dataset[pm_tree.pivots[i]]);
             }
 
-            pm_tree.for_node_in_path(623, |node| {
-                pm_tree.pivots;
-                match node {
-                    Node::Inner(inner) => {
-                        let mut conditions = Vec::new();
-                        let mut tests = Vec::new();
-                        let mut distances = Vec::new();
-                        let mut thresholds = Vec::new();
-                        for i in 0..inner.len {
-                            conditions.push(
-                                inner.hyperrings[i]
-                                    .iter()
-                                    .zip(&q_pivot_dists)
-                                    .all(|(hr, qd)| qd - $range <= hr.max && qd + $range >= hr.min),
-                            );
-                            tests.push(
-                                Euclidean::distance(query, &$dataset[inner.routers[i]])
-                                    <= inner.radius[i] + $range,
-                            );
-                            distances.push(Euclidean::distance(query, &$dataset[inner.routers[i]]));
-                            thresholds.push(inner.radius[i] + $range);
-                        }
-                        println!("inner distances {:?}", distances);
-                        println!("inner threshold {:?}", thresholds);
-                        println!("inner tests {:?}", tests);
-                        println!("inner {:?} {:?}", conditions, &inner.routers[..inner.len]);
-                    }
-                    Node::Leaf(leaf) => {
-                        let mut conditions = Vec::new();
-                        let mut tests = Vec::new();
-                        for i in 0..leaf.len {
-                            conditions.push(
-                                leaf.pivot_distances[i]
-                                    .iter()
-                                    .zip(q_pivot_dists.iter())
-                                    .all(|(pd, qd)| (pd - qd).abs() <= $range),
-                            );
-                            tests.push(
-                                Euclidean::distance(query, &$dataset[leaf.elements[i]]) <= $range,
-                            )
-                        }
-                        println!("leaf elements {:?}", &leaf.elements[..leaf.len]);
-                        println!("leaf tests {:?}", tests);
-                        println!("leaf {:?}", conditions)
-                    }
-                }
-            });
-
             let t_baseline = Instant::now();
             let mut expected = BTreeSet::new();
             for (i, v) in $dataset.iter().enumerate() {
@@ -1123,8 +1075,6 @@ mod tests {
         for i in 0..dataset.len() {
             pm_tree.insert(i, &dataset);
         }
-        pm_tree.for_node_in_path(5, |node| println!("{:?}", node));
-        pm_tree.for_node_in_path(9, |node| println!("{:?}", node));
 
         let k = 4;
         let mut expected = BinaryHeap::new();
