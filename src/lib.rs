@@ -1,5 +1,6 @@
 #![feature(drain_filter, new_uninit, maybe_uninit_uninit_array)]
 
+use std::fmt::Debug;
 use std::marker::PhantomData;
 
 pub trait Distance<T> {
@@ -98,6 +99,11 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> PMTree<T, D, B, P> {
     #[cfg(test)]
     fn for_each_leaf<F: FnMut(&LeafNode<T, D, B, P>)>(&self, mut callback: F) {
         self.root.for_each_leaf(&mut callback);
+    }
+
+    #[cfg(test)]
+    fn for_node_in_path<F: FnMut(&Node<T, D, B, P>)>(&self, id: usize, mut callback: F) {
+        self.root.for_node_in_path(id, &mut callback);
     }
 }
 
@@ -274,6 +280,30 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> Node<T, D, B, P> {
             }
         }
     }
+
+    #[cfg(test)]
+    fn for_node_in_path<F: FnMut(&Node<T, D, B, P>)>(&self, id: usize, callback: &mut F) -> bool {
+        match self {
+            Self::Inner(inner) => {
+                for child in inner.children[..inner.len].iter() {
+                    let child = child.as_ref().unwrap();
+                    if child.for_node_in_path(id, callback) {
+                        callback(&self);
+                        return true;
+                    }
+                }
+                false
+            }
+            Self::Leaf(leaf) => {
+                if let Some(_) = leaf.elements[..leaf.len].iter().find(|o| **o == id) {
+                    callback(&self);
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
 }
 
 fn promote<T, D: Distance<T>>(o: usize, os: &[usize], dataset: &[T]) -> (usize, usize) {
@@ -304,7 +334,7 @@ fn promote<T, D: Distance<T>>(o: usize, os: &[usize], dataset: &[T]) -> (usize, 
 }
 
 // #[derive(Serialize, Deserialize)]
-#[derive(Debug)]
+// #[derive(Debug)]
 struct InnerNode<T, D: Distance<T>, const B: usize, const P: usize> {
     len: usize,
     parent_distance: [Option<f64>; B],
@@ -347,7 +377,7 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> InnerNode<T, D, B, P> {
             })
             .min_by(|p1, p2| p1.1.partial_cmp(&p2.1).unwrap());
 
-        if let Some((closest, _distance)) = closest {
+        if let Some((closest, distance)) = closest {
             let possible_split =
                 self.children[closest]
                     .as_mut()
@@ -360,12 +390,23 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> InnerNode<T, D, B, P> {
 
                 // now, insert the new node directly, if possible, otherwise split the current node
                 if self.len < B {
+                    // FIXME: in case of split, update the radius and hyperrings without recomputing from scratch
                     self.do_insert(o2, Box::new(n2), parent, pivots, dataset);
                     None
                 } else {
                     Some(self.split(o2, Box::new(n2), pivots, dataset))
                 }
             } else {
+                // no split, we simply update the radius and hyperrings
+                self.radius[closest] = distance;
+                for j in 0..P {
+                    if distance > self.hyperrings[closest][j].max {
+                        self.hyperrings[closest][j].max = distance;
+                    }
+                    if distance < self.hyperrings[closest][j].min {
+                        self.hyperrings[closest][j].min = distance;
+                    }
+                }
                 None
             }
         } else {
@@ -399,9 +440,9 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> InnerNode<T, D, B, P> {
         self.routers[i] = o;
         self.parent_distance[i] = parent.map(|parent| D::distance(&dataset[o], &dataset[parent]));
         self.hyperrings[i] = [Default::default(); P];
-        let r = child.update_hyperrings_and_radius(o, pivots, &mut self.hyperrings[i], dataset);
-        self.radius[i] = r;
         self.children[i].replace(child);
+        let r = self.children[i].as_mut().unwrap().update_hyperrings_and_radius(o, pivots, &mut self.hyperrings[i], dataset);
+        self.radius[i] = r;
     }
 
     fn split(
@@ -453,8 +494,29 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> InnerNode<T, D, B, P> {
     }
 }
 
-// #[derive(Serialize, Deserialize)]
-#[derive(Debug)]
+impl<T, D, const B: usize, const P: usize> std::fmt::Debug for InnerNode<T, D, B, P>
+where
+    T: Debug,
+    D: Distance<T> + Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InnerNode")
+            .field("len", &self.len)
+            .field(
+                "parent_distance",
+                &format_args!("{:?}", &self.parent_distance[..self.len]),
+            )
+            .field("routers", &format_args!("{:?}", &self.routers[..self.len]))
+            .field("radius", &format_args!("{:?}", &self.radius[..self.len]))
+            .field(
+                "hyperrings",
+                &format_args!("{:?}", &self.hyperrings[..self.len]),
+            )
+            // .field("children", &format_args!("{:?}", &self.children[..self.len]))
+            .finish()
+    }
+}
+
 struct LeafNode<T, D: Distance<T>, const B: usize, const P: usize> {
     len: usize,
     parent_distance: [Option<f64>; B],
@@ -535,6 +597,30 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> LeafNode<T, D, B, P> {
     }
 }
 
+impl<T, D, const B: usize, const P: usize> std::fmt::Debug for LeafNode<T, D, B, P>
+where
+    T: Debug,
+    D: Distance<T> + Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LeafNode")
+            .field("len", &self.len)
+            .field(
+                "parent_distance",
+                &format_args!("{:?}", &self.parent_distance[..self.len]),
+            )
+            .field(
+                "pivot_distances",
+                &format_args!("{:?}", &self.pivot_distances[..self.len]),
+            )
+            .field(
+                "elements",
+                &format_args!("{:?}", &self.elements[..self.len]),
+            )
+            .finish()
+    }
+}
+
 // #[derive(Serialize, Deserialize)]
 #[derive(Debug)]
 pub struct Euclidean;
@@ -552,8 +638,10 @@ impl Distance<Vec<f64>> for Euclidean {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::{Distance, Euclidean, PMTree};
     use pretty_assertions::assert_eq;
+    use std::collections::BTreeSet;
     use std::fs::File;
     use std::io::prelude::*;
     use std::path::PathBuf;
@@ -569,15 +657,17 @@ mod tests {
         let mut f = File::create(&local).unwrap();
         std::io::copy(
             // the file is, very simply, stored in the public folder of my personal dropbox
-            &mut ureq::get("https://dl.dropboxusercontent.com/s/kdh02vg1lb3qm5j/glove-25.hdf5?dl=0")
-                .call()
-                .unwrap()
-                .into_reader(),
+            &mut ureq::get(
+                "https://dl.dropboxusercontent.com/s/kdh02vg1lb3qm5j/glove-25.hdf5?dl=0",
+            )
+            .call()
+            .unwrap()
+            .into_reader(),
             &mut f,
-        ).unwrap();
+        )
+        .unwrap();
         local
     }
-
 
     #[test]
     fn construction() {
@@ -637,58 +727,116 @@ mod tests {
         })
     }
 
+    macro_rules! test_range_query {
+        ($dataset:ident, $B:literal, $P:literal, $from:literal, $range:literal) => {
+            let t_build = Instant::now();
+            let pm_tree = PMTree::<Vec<f64>, Euclidean, $B, $P>::for_dataset(&$dataset, 1234);
+            assert_eq!(pm_tree.size(), $dataset.len());
+
+            eprintln!(
+                "tree built in {:?}, with height {}",
+                t_build.elapsed(),
+                pm_tree.height()
+            );
+            let mut f = File::create("/tmp/tree.txt").unwrap();
+            writeln!(f, "{:#?}", pm_tree).unwrap();
+
+            let query = &$dataset[0];
+            let mut q_pivot_dists = [0.0; $P];
+            for i in 0..$P {
+                q_pivot_dists[i] = Euclidean::distance(query, &$dataset[pm_tree.pivots[i]]);
+            }
+
+            pm_tree.for_node_in_path(623, |node| {
+                pm_tree.pivots;
+                match node {
+                    Node::Inner(inner) => {
+                        let mut conditions = Vec::new();
+                        let mut tests = Vec::new();
+                        let mut distances = Vec::new();
+                        let mut thresholds = Vec::new();
+                        for i in 0..inner.len {
+                            conditions.push(
+                                inner.hyperrings[i]
+                                    .iter()
+                                    .zip(&q_pivot_dists)
+                                    .all(|(hr, qd)| qd - $range <= hr.max && qd + $range >= hr.min),
+                            );
+                            tests.push(
+                                Euclidean::distance(query, &$dataset[inner.routers[i]])
+                                    <= inner.radius[i] + $range,
+                            );
+                            distances.push(Euclidean::distance(query, &$dataset[inner.routers[i]]));
+                            thresholds.push(inner.radius[i] + $range);
+                        }
+                        println!("inner distances {:?}", distances);
+                        println!("inner threshold {:?}", thresholds);
+                        println!("inner tests {:?}", tests);
+                        println!("inner {:?} {:?}", conditions, &inner.routers[..inner.len]);
+                    }
+                    Node::Leaf(leaf) => {
+                        let mut conditions = Vec::new();
+                        let mut tests = Vec::new();
+                        for i in 0..leaf.len {
+                            conditions.push(
+                                leaf.pivot_distances[i]
+                                    .iter()
+                                    .zip(q_pivot_dists.iter())
+                                    .all(|(pd, qd)| (pd - qd).abs() <= $range),
+                            );
+                            tests.push(
+                                Euclidean::distance(query, &$dataset[leaf.elements[i]]) <= $range,
+                            )
+                        }
+                        println!("leaf elements {:?}", &leaf.elements[..leaf.len]);
+                        println!("leaf tests {:?}", tests);
+                        println!("leaf {:?}", conditions)
+                    }
+                }
+            });
+
+            let t_baseline = Instant::now();
+            let mut expected = BTreeSet::new();
+            for (i, v) in $dataset.iter().enumerate() {
+                if Euclidean::distance(v, query) <= $range {
+                    expected.insert(i);
+                }
+            }
+            eprintln!("Time for linear scan {:?}", t_baseline.elapsed());
+
+            let t_tree = Instant::now();
+            let mut res = BTreeSet::new();
+            let cnt_dists = pm_tree.range_query($range, query, &$dataset, |i| {
+                res.insert(i);
+            });
+            eprintln!("Time for tree {:?}", t_tree.elapsed());
+            eprintln!(
+                "computed {} distances, solution for range {} has {} elements, and should have {}",
+                cnt_dists,
+                $range,
+                res.len(),
+                expected.len()
+            );
+
+            assert_eq!(expected, res);
+        };
+    }
+
     #[test]
     fn range_query_glove25() {
         use ndarray::s;
         let path = ensure_glove25();
         let f = hdf5::File::open(path).unwrap();
         let data = f.dataset("/train").unwrap();
-        let array = data.read_slice_2d::<f64, _>(s![..10000, ..]).unwrap();
+        let array = data.read_slice_2d::<f64, _>(s![..624, ..]).unwrap();
         let mut dataset = Vec::new();
         for row in array.rows() {
             let r = row.as_slice().unwrap();
             dataset.push(Vec::from(r));
         }
 
-        const B: usize = 32;
-        const P: usize = 8;
-        let t_build = Instant::now();
-        let pm_tree = PMTree::<Vec<f64>, Euclidean, B, P>::for_dataset(&dataset, 1234);
-        assert_eq!(pm_tree.size(), dataset.len());
-
-        eprintln!(
-            "tree built in {:?}, with height {}",
-            t_build.elapsed(),
-            pm_tree.height()
-        );
-        let mut f = File::create("/tmp/tree.txt").unwrap();
-        writeln!(f, "{:#?}", pm_tree).unwrap();
-
-        let query = &dataset[0];
-        let range = 2.0;
-
-        let t_baseline = Instant::now();
-        let mut expected = Vec::new();
-        for (i, v) in dataset.iter().enumerate() {
-            if Euclidean::distance(v, query) <= range {
-                expected.push(i);
-            }
-        }
-        eprintln!("Time for linear scan {:?}", t_baseline.elapsed());
-
-        let t_tree = Instant::now();
-        let mut res = Vec::new();
-        let cnt_dists = pm_tree.range_query(range, query, &dataset, |i| res.push(i));
-        eprintln!("Time for tree {:?}", t_tree.elapsed());
-        res.sort();
-        eprintln!(
-            "computed {} distances, solution has {} elements, and should have {}",
-            cnt_dists,
-            res.len(),
-            expected.len()
-        );
-
-        assert_eq!(expected, res);
+        test_range_query!(dataset, 32, 8, 0, 2.0);
+        test_range_query!(dataset, 32, 8, 0, 4.0);
     }
 
     #[test]

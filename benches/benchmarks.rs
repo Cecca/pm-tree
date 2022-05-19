@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 use std::io::prelude::*;
 use std::str::FromStr;
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion, black_box};
 use hdf5::File;
-use pm_tree::{Euclidean, PMTree};
+use pm_tree::{Euclidean, PMTree, Distance};
 
 macro_rules! bench_builder {
     ($group: ident, $B:literal, $P:literal, $dataset:ident) => {
@@ -20,6 +20,14 @@ macro_rules! bench_range_query {
             tree.range_query($range, query, &$dataset, |i| res.push(i));
         }));
     };
+}
+
+fn linear_scan<T, D: Distance<T>, F: FnMut(usize)>(range: f64, query: &T, dataset: &[T], mut callback: F) {
+    for (i, v) in dataset.iter().enumerate() {
+        if D::distance(query, v) <= range {
+            callback(i);
+        }
+    }
 }
 
 fn bench_glove25(c: &mut Criterion) {
@@ -44,6 +52,19 @@ fn bench_glove25(c: &mut Criterion) {
     {
         let mut group = c.benchmark_group("range query");
         group.sample_size(10);
+        group.bench_function("linear scan r = 2", |b| {
+            b.iter(|| {
+                let mut res = Vec::new();
+                linear_scan::<_, Euclidean, _>(2.0, &dataset[0], &dataset, |i| res.push(i));
+            })
+        });
+        group.bench_function("linear scan r = 4", |b| {
+            b.iter(|| {
+                let mut res = Vec::new();
+                linear_scan::<_, Euclidean, _>(4.0, &dataset[0], &dataset, |i| res.push(i));
+            })
+        });
+
         bench_range_query!(group, 32, 4, dataset, 0, 2.0);
         bench_range_query!(group, 64, 4, dataset, 0, 2.0);
         bench_range_query!(group, 32, 8, dataset, 0, 2.0);
