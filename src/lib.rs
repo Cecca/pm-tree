@@ -1,8 +1,4 @@
-#![feature(
-    drain_filter,
-    new_uninit,
-    maybe_uninit_uninit_array
-)]
+#![feature(drain_filter, new_uninit, maybe_uninit_uninit_array)]
 
 use std::marker::PhantomData;
 
@@ -280,12 +276,7 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> Node<T, D, B, P> {
     }
 }
 
-fn promote<T, D: Distance<T>>(
-    o: usize,
-    os: &[usize],
-    dataset: &[T],
-) -> (usize, usize)
-{
+fn promote<T, D: Distance<T>>(o: usize, os: &[usize], dataset: &[T]) -> (usize, usize) {
     // assert!(os.len() <= B);
     // // Pre-compute the pairwise distances
     // let mut distmatrix = [[std::f64::INFINITY; B + 1]; B + 1];
@@ -565,7 +556,28 @@ mod tests {
     use pretty_assertions::assert_eq;
     use std::fs::File;
     use std::io::prelude::*;
+    use std::path::PathBuf;
+    use std::str::FromStr;
     use std::time::Instant;
+
+    fn ensure_glove25() -> std::path::PathBuf {
+        let local = PathBuf::from_str(".glove-25.hdf5").unwrap();
+        if local.is_file() {
+            return local;
+        }
+        eprintln!("Downloading the dataset for tests");
+        let mut f = File::create(&local).unwrap();
+        std::io::copy(
+            // the file is, very simply, stored in the public folder of my personal dropbox
+            &mut ureq::get("https://dl.dropboxusercontent.com/s/kdh02vg1lb3qm5j/glove-25.hdf5?dl=0")
+                .call()
+                .unwrap()
+                .into_reader(),
+            &mut f,
+        ).unwrap();
+        local
+    }
+
 
     #[test]
     fn construction() {
@@ -628,7 +640,8 @@ mod tests {
     #[test]
     fn range_query_glove25() {
         use ndarray::s;
-        let f = hdf5::File::open("glove-25.hdf5").unwrap();
+        let path = ensure_glove25();
+        let f = hdf5::File::open(path).unwrap();
         let data = f.dataset("/train").unwrap();
         let array = data.read_slice_2d::<f64, _>(s![..10000, ..]).unwrap();
         let mut dataset = Vec::new();
@@ -643,7 +656,11 @@ mod tests {
         let pm_tree = PMTree::<Vec<f64>, Euclidean, B, P>::for_dataset(&dataset, 1234);
         assert_eq!(pm_tree.size(), dataset.len());
 
-        eprintln!("tree built in {:?}, with height {}", t_build.elapsed(), pm_tree.height());
+        eprintln!(
+            "tree built in {:?}, with height {}",
+            t_build.elapsed(),
+            pm_tree.height()
+        );
         let mut f = File::create("/tmp/tree.txt").unwrap();
         writeln!(f, "{:#?}", pm_tree).unwrap();
 
@@ -711,5 +728,4 @@ mod tests {
 
         assert_eq!(expected, res);
     }
-
 }
