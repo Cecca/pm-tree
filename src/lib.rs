@@ -127,7 +127,7 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> PMTree<T, D, B, P> {
                     for j in i..inner.len {
                         let a = inner.routers[i];
                         let b = inner.routers[j];
-                        let mindist = inner.mindist(&inner, i, j, dataset);
+                        let mindist = inner.mindist(&inner, i, j, dataset, false);
                         pq.push(NodePair::new(
                             1,
                             mindist,
@@ -157,7 +157,7 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> PMTree<T, D, B, P> {
                                     for j in i..inner.len {
                                         let a = inner.routers[i];
                                         let b = inner.routers[j];
-                                        let mindist = inner.mindist(&inner, i, j, dataset);
+                                        let mindist = inner.mindist(&inner, i, j, dataset, false);
                                         pq.push(NodePair::new(
                                             node_pair.level + 1,
                                             mindist,
@@ -189,7 +189,7 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> PMTree<T, D, B, P> {
                                     for j in 0..n2.len {
                                         let a = n1.routers[i];
                                         let b = n2.routers[j];
-                                        let mindist = n1.mindist(n2, i, j, dataset);
+                                        let mindist = n1.mindist(n2, i, j, dataset, false);
                                         pq.push(NodePair::new(
                                             node_pair.level + 1,
                                             mindist,
@@ -415,6 +415,14 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> Node<T, D, B, P> {
                 .take(inner.len)
                 .for_each(|c| c.as_ref().unwrap().for_each_leaf(callback)),
         }
+    }
+
+    fn for_each_id<F: FnMut(usize)>(&self, callback: &mut F) {
+        self.for_each_leaf(&mut |leaf: &LeafNode<T, D, B, P>| {
+            for id in &leaf.elements[..leaf.len] {
+                callback(*id);
+            }
+        });
     }
 
     /// compute the size of this subtree
@@ -697,20 +705,41 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> InnerNode<T, D, B, P> {
 
     /// Given `self` and `other`, return the minimum distance between child `i` of `self` and
     /// child `j` of `other`.
-    fn mindist(&self, other: &Self, i: usize, j: usize, dataset: &[T]) -> f64 {
+    fn mindist(&self, other: &Self, i: usize, j: usize, dataset: &[T], radiusonly: bool) -> f64 {
+        assert!(i < self.len);
+        assert!(j < other.len);
         let a = self.routers[i];
         let b = other.routers[j];
         let radius_a = self.radius[i];
         let radius_b = other.radius[j];
         let d = D::distance(&dataset[a], &dataset[b]);
 
-        let mut mindist = d - radius_a - radius_b;
+        let mut actual_mindist = std::f64::INFINITY;
+        let mut ids_a = Vec::new();
+        let mut ids_b = Vec::new();
+        self.children[i].as_ref().unwrap().for_each_id(&mut |id| ids_a.push(id));
+        other.children[j].as_ref().unwrap().for_each_id(&mut |id| ids_b.push(id));
+        for &id_a in &ids_a {
+            for &id_b in &ids_b {
+                let d = D::distance(&dataset[id_a], &dataset[id_b]);
+                if d < actual_mindist {
+                    actual_mindist = d;
+                }
+            }
+        }
+
+        let mindist = d - radius_a - radius_b;
+        let mut mindist = if mindist < 0.0 { 0.0 } else { mindist };
+        if radiusonly {
+            return mindist;
+        }
         for (hr_a, hr_b) in self.hyperrings[i].iter().zip(&other.hyperrings[j]) {
             let d = hr_a.distance(hr_b);
             if d > mindist {
                 mindist = d;
             }
         }
+        assert!(mindist <= actual_mindist);
         mindist
     }
 }
@@ -1073,7 +1102,7 @@ mod tests {
         test_range_query!(dataset, 32, 8, 0, 2.0);
         test_range_query!(dataset, 32, 8, 0, 4.0);
     }
-    
+
     #[test]
     fn closest_pairs_glove25() {
         use ndarray::s;
@@ -1087,12 +1116,12 @@ mod tests {
             dataset.push(Vec::from(r));
         }
 
-        test_closest_pairs!(dataset, 32, 8, 5);
-        test_closest_pairs!(dataset, 32, 8, 10);
-        test_closest_pairs!(dataset, 32, 8, 100);
-        test_closest_pairs!(dataset, 64, 8, 5);
-        test_closest_pairs!(dataset, 64, 8, 10);
-        test_closest_pairs!(dataset, 64, 8, 100);
+        // test_closest_pairs!(dataset, 32, 8, 5);
+        // test_closest_pairs!(dataset, 32, 8, 10);
+        // test_closest_pairs!(dataset, 32, 8, 100);
+        test_closest_pairs!(dataset, 64, 8, 2);
+        // test_closest_pairs!(dataset, 64, 8, 10);
+        // test_closest_pairs!(dataset, 64, 8, 100);
     }
 
     #[test]
