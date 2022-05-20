@@ -127,11 +127,7 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> PMTree<T, D, B, P> {
                     for j in i..inner.len {
                         let a = inner.routers[i];
                         let b = inner.routers[j];
-                        let radius_a = inner.radius[i];
-                        let radius_b = inner.radius[j];
-                        let d = D::distance(&dataset[a], &dataset[b]);
-                        // TODO: include in mindist also the pivot based lower bounds
-                        let mindist = d - radius_a - radius_b;
+                        let mindist = inner.mindist(&inner, i, j, dataset);
                         pq.push(NodePair::new(
                             1,
                             mindist,
@@ -161,11 +157,7 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> PMTree<T, D, B, P> {
                                     for j in i..inner.len {
                                         let a = inner.routers[i];
                                         let b = inner.routers[j];
-                                        let radius_a = inner.radius[i];
-                                        let radius_b = inner.radius[j];
-                                        let d = D::distance(&dataset[a], &dataset[b]);
-                                        // TODO: include in mindist also the pivot based lower bounds
-                                        let mindist = d - radius_a - radius_b;
+                                        let mindist = inner.mindist(&inner, i, j, dataset);
                                         pq.push(NodePair::new(
                                             node_pair.level + 1,
                                             mindist,
@@ -202,11 +194,7 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> PMTree<T, D, B, P> {
                                     for j in 0..n2.len {
                                         let a = n1.routers[i];
                                         let b = n2.routers[j];
-                                        let radius_a = n1.radius[i];
-                                        let radius_b = n2.radius[j];
-                                        let d = D::distance(&dataset[a], &dataset[b]);
-                                        // TODO: include in mindist also the pivot based lower bounds
-                                        let mindist = d - radius_a - radius_b;
+                                        let mindist = n1.mindist(n2, i, j, dataset);
                                         pq.push(NodePair::new(
                                             node_pair.level + 1,
                                             mindist,
@@ -322,6 +310,22 @@ impl Default for Hyperring {
         Self {
             min: std::f64::INFINITY,
             max: 0.0,
+        }
+    }
+}
+
+impl Hyperring {
+    /// Return a lower bound to the distance between the nodes belonging to the two given
+    /// hyperrings, assuming that they both refer to the same pivot.
+    /// It is up to the caller to ensure that this holds
+    fn distance(&self, other: &Self) -> f64 {
+        if self.max < other.min {
+            other.min - self.max
+        } else if other.max < self.min {
+            self.min - other.max
+        } else {
+            // the two hyperrings overlap
+            0.0
         }
     }
 }
@@ -535,8 +539,6 @@ fn promote<T, D: Distance<T>>(o: usize, os: &[usize], dataset: &[T]) -> (usize, 
     (o, os[0])
 }
 
-// #[derive(Serialize, Deserialize)]
-// #[derive(Debug)]
 struct InnerNode<T, D: Distance<T>, const B: usize, const P: usize> {
     len: usize,
     parent_distance: [Option<f64>; B],
@@ -696,6 +698,25 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> InnerNode<T, D, B, P> {
         }
         self.len = 0;
         (o1, n1, o2, n2)
+    }
+
+    /// Given `self` and `other`, return the minimum distance between child `i` of `self` and
+    /// child `j` of `other`.
+    fn mindist(&self, other: &Self, i: usize, j: usize, dataset: &[T]) -> f64 {
+        let a = self.routers[i];
+        let b = other.routers[j];
+        let radius_a = self.radius[i];
+        let radius_b = other.radius[j];
+        let d = D::distance(&dataset[a], &dataset[b]);
+
+        let mut mindist = d - radius_a - radius_b;
+        for (hr_a, hr_b) in self.hyperrings[i].iter().zip(&other.hyperrings[j]) {
+            let d = hr_a.distance(hr_b);
+            if d > mindist {
+                mindist = d;
+            }
+        }
+        mindist
     }
 }
 
