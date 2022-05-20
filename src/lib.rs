@@ -127,7 +127,7 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> PMTree<T, D, B, P> {
                     for j in i..inner.len {
                         let a = inner.routers[i];
                         let b = inner.routers[j];
-                        let mindist = inner.mindist(&inner, i, j, dataset, false);
+                        let mindist = inner.mindist(&inner, i, j, self.pivots, dataset);
                         pq.push(NodePair::new(
                             1,
                             mindist,
@@ -157,7 +157,8 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> PMTree<T, D, B, P> {
                                     for j in i..inner.len {
                                         let a = inner.routers[i];
                                         let b = inner.routers[j];
-                                        let mindist = inner.mindist(&inner, i, j, dataset, false);
+                                        let mindist =
+                                            inner.mindist(&inner, i, j, self.pivots, dataset);
                                         pq.push(NodePair::new(
                                             node_pair.level + 1,
                                             mindist,
@@ -189,7 +190,7 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> PMTree<T, D, B, P> {
                                     for j in 0..n2.len {
                                         let a = n1.routers[i];
                                         let b = n2.routers[j];
-                                        let mindist = n1.mindist(n2, i, j, dataset, false);
+                                        let mindist = n1.mindist(n2, i, j, self.pivots, dataset);
                                         pq.push(NodePair::new(
                                             node_pair.level + 1,
                                             mindist,
@@ -294,7 +295,7 @@ impl<'tree, T, D: Distance<T>, const B: usize, const P: usize> Ord for NodePair<
 }
 
 // #[derive(Serialize, Deserialize)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 struct Hyperring {
     min: f64,
     max: f64,
@@ -340,12 +341,16 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> Node<T, D, B, P> {
         pivots: [usize; P],
         dataset: &[T],
     ) -> Option<(usize, Self, usize, Self)> {
+        let mut pivot_dists = [0.0; P];
+        for p_idx in 0..P {
+            pivot_dists[p_idx] = D::distance(&dataset[o], &dataset[pivots[p_idx]]);
+        }
         match self {
             Node::Inner(inner) => inner
-                .insert(o, parent, pivots, dataset)
+                .insert(o, parent, pivot_dists, pivots, dataset)
                 .map(|(o1, n1, o2, n2)| (o1, Self::Inner(n1), o2, Self::Inner(n2))),
             Node::Leaf(leaf) => leaf
-                .insert(o, parent, pivots, dataset)
+                .insert(o, parent, pivot_dists, pivots, dataset)
                 .map(|(o1, n1, o2, n2)| (o1, Self::Leaf(n1), o2, Self::Leaf(n2))),
         }
     }
@@ -542,6 +547,32 @@ fn promote<T, D: Distance<T>>(o: usize, os: &[usize], dataset: &[T]) -> (usize, 
     (o, os[0])
 }
 
+macro_rules! update_max {
+    ($reference:expr, $candidate:expr) => {
+        if $candidate > $reference {
+            $reference = $candidate
+        }
+    };
+    ($reference:expr, $candidate:ident) => {
+        if $candidate > $reference {
+            $reference = $candidate
+        }
+    };
+}
+
+macro_rules! update_min {
+    ($reference:expr, $candidate:expr) => {
+        if $candidate < $reference {
+            $reference = $candidate
+        }
+    };
+    ($reference:expr, $candidate:ident) => {
+        if $candidate < $reference {
+            $reference = $candidate
+        }
+    };
+}
+
 struct InnerNode<T, D: Distance<T>, const B: usize, const P: usize> {
     len: usize,
     parent_distance: [Option<f64>; B],
@@ -573,9 +604,16 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> InnerNode<T, D, B, P> {
         &mut self,
         o: usize,
         parent: Option<usize>,
+        pivots_dists: [f64; P],
         pivots: [usize; P],
         dataset: &[T],
     ) -> Option<(usize, Self, usize, Self)> {
+        #[cfg(test)]
+        assert!(
+            self.check_hyperrings(pivots, dataset),
+            "precondition on hyperrings"
+        );
+
         // find the routing element closest
         let closest = (0..self.len)
             .map(|i| {
@@ -591,7 +629,7 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> InnerNode<T, D, B, P> {
                     .unwrap()
                     .insert(o, Some(closest), pivots, dataset);
 
-            if let Some((o1, n1, o2, n2)) = possible_split {
+            let ret = if let Some((o1, n1, o2, n2)) = possible_split {
                 // replace node `closest` with o1
                 self.replace_at(closest, o1, Box::new(n1), parent, pivots, dataset);
 
@@ -599,23 +637,64 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> InnerNode<T, D, B, P> {
                 if self.len < B {
                     // FIXME: in case of split, update the radius and hyperrings without recomputing from scratch
                     self.do_insert(o2, Box::new(n2), parent, pivots, dataset);
+                    #[cfg(test)]
+                    assert!(
+                        self.check_hyperrings(pivots, dataset),
+                        "fail hyperrings check direct replacement"
+                    );
                     None
                 } else {
-                    Some(self.split(o2, Box::new(n2), pivots, dataset))
+                    let splitresult = self.split(o2, Box::new(n2), pivots, dataset);
+                    #[cfg(test)]
+                    assert!(
+                        splitresult.1.check_radius(dataset),
+                        "failed radius check after split (left)"
+                    );
+                    #[cfg(test)]
+                    assert!(
+                        splitresult.3.check_radius(dataset),
+                        "failed radius check after split (right)"
+                    );
+                    #[cfg(test)]
+                    assert!(
+                        splitresult.1.check_hyperrings(pivots, dataset),
+                        "fail hyperrings check after split (left)"
+                    );
+                    #[cfg(test)]
+                    assert!(
+                        splitresult.3.check_hyperrings(pivots, dataset),
+                        "fail hyperrings check after split (right)"
+                    );
+                    Some(splitresult)
                 }
             } else {
                 // no split, we simply update the radius and hyperrings
-                self.radius[closest] = distance;
+                update_max!(self.radius[closest], distance);
                 for j in 0..P {
-                    if distance > self.hyperrings[closest][j].max {
-                        self.hyperrings[closest][j].max = distance;
-                    }
-                    if distance < self.hyperrings[closest][j].min {
-                        self.hyperrings[closest][j].min = distance;
-                    }
+                    update_max!(self.hyperrings[closest][j].max, pivots_dists[j]);
+                    update_min!(self.hyperrings[closest][j].min, pivots_dists[j]);
                 }
+
+                #[cfg(test)]
+                assert!(
+                    self.check_radius(dataset),
+                    "fail radius check after insertion with no child split (child index {})",
+                    closest
+                );
+                #[cfg(test)]
+                assert!(
+                    self.check_hyperrings(pivots, dataset),
+                    "fail hyperrings check after insertion with no child split (child index {})",
+                    closest
+                );
                 None
-            }
+            };
+            #[cfg(test)]
+            assert!(
+                self.check_radius(dataset),
+                "fail radius check after insertion"
+            );
+            ret
         } else {
             panic!("Empty inner node?");
         }
@@ -703,22 +782,80 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> InnerNode<T, D, B, P> {
         (o1, n1, o2, n2)
     }
 
-    /// Given `self` and `other`, return the minimum distance between child `i` of `self` and
-    /// child `j` of `other`.
-    fn mindist(&self, other: &Self, i: usize, j: usize, dataset: &[T], radiusonly: bool) -> f64 {
+    /// compute the radius (i.e. don't use the cached one) for the `i`-th child
+    #[cfg(test)]
+    fn compute_radius(&self, i: usize, dataset: &[T]) -> f64 {
         assert!(i < self.len);
-        assert!(j < other.len);
-        let a = self.routers[i];
-        let b = other.routers[j];
-        let radius_a = self.radius[i];
-        let radius_b = other.radius[j];
-        let d = D::distance(&dataset[a], &dataset[b]);
+        let mut radius = 0.0;
+        let center = &dataset[self.routers[i]];
+        self.children[i].as_ref().unwrap().for_each_id(&mut |id| {
+            let v = &dataset[id];
+            let d = D::distance(v, center);
+            if d > radius {
+                radius = d;
+            }
+        });
+        radius
+    }
 
+    #[cfg(test)]
+    fn compute_hyperrings(&self, i: usize, pivots: [usize; P], dataset: &[T]) -> [Hyperring; P] {
+        assert!(i < self.len);
+        let mut rings = [Hyperring::default(); P];
+        self.children[i].as_ref().unwrap().for_each_id(&mut |id| {
+            let v = &dataset[id];
+            for p_idx in 0..P {
+                let d = D::distance(v, &dataset[pivots[p_idx]]);
+                update_max!(rings[p_idx].max, d);
+                update_min!(rings[p_idx].min, d);
+            }
+        });
+        rings
+    }
+
+    /// Checks that the all the radii of the children are correct
+    #[cfg(test)]
+    fn check_radius(&self, dataset: &[T]) -> bool {
+        for i in 0..self.len {
+            let expected = self.radius[i];
+            let actual = self.compute_radius(i, dataset);
+            if expected != actual {
+                eprintln!("child {} expected radius {} actual {}", i, expected, actual);
+                return false;
+            }
+        }
+        true
+    }
+
+    #[cfg(test)]
+    fn check_hyperrings(&self, pivots: [usize; P], dataset: &[T]) -> bool {
+        for i in 0..self.len {
+            let expected = self.hyperrings[i];
+            let actual = self.compute_hyperrings(i, pivots, dataset);
+            if expected != actual {
+                eprintln!(
+                    "child {} expected hyperrings\n{:#?}\nactual\n{:#?}",
+                    i, expected, actual
+                );
+                return false;
+            }
+        }
+        true
+    }
+
+    #[cfg(test)]
+    fn compute_mindist(&self, other: &Self, i: usize, j: usize, dataset: &[T]) -> f64 {
         let mut actual_mindist = std::f64::INFINITY;
         let mut ids_a = Vec::new();
         let mut ids_b = Vec::new();
-        self.children[i].as_ref().unwrap().for_each_id(&mut |id| ids_a.push(id));
-        other.children[j].as_ref().unwrap().for_each_id(&mut |id| ids_b.push(id));
+        self.children[i]
+            .as_ref()
+            .unwrap()
+            .for_each_id(&mut |id| ids_a.push(id));
+        other.children[j]
+            .as_ref()
+            .unwrap()
+            .for_each_id(&mut |id| ids_b.push(id));
         for &id_a in &ids_a {
             for &id_b in &ids_b {
                 let d = D::distance(&dataset[id_a], &dataset[id_b]);
@@ -727,19 +864,59 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> InnerNode<T, D, B, P> {
                 }
             }
         }
+        actual_mindist
+    }
+
+    /// Given `self` and `other`, return the minimum distance between child `i` of `self` and
+    /// child `j` of `other`.
+    fn mindist(&self, other: &Self, i: usize, j: usize, pivots: [usize; P], dataset: &[T]) -> f64 {
+        #[cfg(test)]
+        assert!(self.check_radius(dataset));
+        #[cfg(test)]
+        assert!(other.check_radius(dataset));
+
+        #[cfg(test)]
+        assert!(self.check_hyperrings(pivots, dataset));
+        #[cfg(test)]
+        assert!(other.check_hyperrings(pivots, dataset));
+
+        assert!(i < self.len);
+        assert!(j < other.len);
+        let a = self.routers[i];
+        let b = other.routers[j];
+        let radius_a = self.radius[i];
+        let radius_b = other.radius[j];
+        let d = D::distance(&dataset[a], &dataset[b]);
+
+        #[cfg(test)]
+        let actual_mindist = self.compute_mindist(other, i, j, dataset);
 
         let mindist = d - radius_a - radius_b;
         let mut mindist = if mindist < 0.0 { 0.0 } else { mindist };
-        if radiusonly {
-            return mindist;
-        }
+
+        #[cfg(test)]
+        assert!(
+            mindist <= actual_mindist,
+            "radius mindist {}, actual {}",
+            mindist,
+            actual_mindist
+        );
+
         for (hr_a, hr_b) in self.hyperrings[i].iter().zip(&other.hyperrings[j]) {
             let d = hr_a.distance(hr_b);
             if d > mindist {
                 mindist = d;
             }
         }
-        assert!(mindist <= actual_mindist);
+
+        #[cfg(test)]
+        assert!(
+            mindist <= actual_mindist,
+            "computed mindist {}, actual {}",
+            mindist,
+            actual_mindist
+        );
+
         mindist
     }
 }
@@ -792,30 +969,29 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> LeafNode<T, D, B, P> {
         &mut self,
         o: usize,
         parent: Option<usize>,
+        pivot_dists: [f64; P],
         pivots: [usize; P],
         dataset: &[T],
     ) -> Option<(usize, Self, usize, Self)> {
         if self.len == B {
-            Some(self.split(o, pivots, dataset))
+            Some(self.split(o, pivot_dists, pivots, dataset))
         } else {
-            self.do_insert(o, parent, pivots, dataset);
+            self.do_insert(o, parent, pivot_dists, pivots, dataset);
             None
         }
     }
 
-    fn do_insert(&mut self, o: usize, parent: Option<usize>, pivots: [usize; P], dataset: &[T]) {
+    fn do_insert(&mut self, o: usize, parent: Option<usize>, pivot_dists: [f64; P], pivots: [usize; P], dataset: &[T]) {
         assert!(self.len < B);
         self.parent_distance[self.len] =
             parent.map(|parent| D::distance(&dataset[o], &dataset[parent]));
         self.elements[self.len] = o;
-        for i in 0..P {
-            self.pivot_distances[self.len][i] = D::distance(&dataset[o], &dataset[pivots[i]]);
-        }
+        self.pivot_distances[self.len] = pivot_dists;
         self.len += 1;
     }
 
     /// Split the current node, leaving it empty, and returns two new nodes with the corresponding routing points
-    fn split(&mut self, o: usize, pivots: [usize; P], dataset: &[T]) -> (usize, Self, usize, Self) {
+    fn split(&mut self, o: usize, pivot_dists: [f64; P], pivots: [usize; P], dataset: &[T]) -> (usize, Self, usize, Self) {
         assert!(self.len == B);
         let (o1, o2) = promote::<_, D>(o, &self.elements[..self.len], dataset);
         let data1 = &dataset[o1];
@@ -824,9 +1000,9 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> LeafNode<T, D, B, P> {
         let mut n2 = Self::new();
 
         if D::distance(&dataset[o], data1) < D::distance(&dataset[o], data2) {
-            n1.do_insert(o, Some(o1), pivots, dataset);
+            n1.do_insert(o, Some(o1), pivot_dists, pivots, dataset);
         } else {
-            n2.do_insert(o, Some(o2), pivots, dataset);
+            n2.do_insert(o, Some(o2), pivot_dists, pivots, dataset);
         }
         for i in 0..self.len {
             let d1 = D::distance(&dataset[self.elements[i]], data1);
@@ -834,11 +1010,11 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> LeafNode<T, D, B, P> {
             if d1 < d2 {
                 // add to first node
                 assert!(n1.len < B);
-                n1.do_insert(self.elements[i], Some(o1), pivots, dataset);
+                n1.do_insert(self.elements[i], Some(o1), self.pivot_distances[i], pivots, dataset);
             } else {
                 // add to second node
                 assert!(n2.len < B);
-                n2.do_insert(self.elements[i], Some(o2), pivots, dataset);
+                n2.do_insert(self.elements[i], Some(o2), self.pivot_distances[i], pivots, dataset);
             }
         }
         self.len = 0;
