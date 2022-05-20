@@ -174,11 +174,6 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> PMTree<T, D, B, P> {
                         // join of two different nodes
                         match (node_pair.anode.as_ref(), node_pair.bnode.as_ref()) {
                             (Node::Leaf(l1), Node::Leaf(l2)) => {
-                                println!(
-                                    "leaves: {:?} and {:?}",
-                                    &l1.elements[..l1.len],
-                                    &l2.elements[..l2.len]
-                                );
                                 for &a in &l1.elements[..l1.len] {
                                     for &b in &l2.elements[..l2.len] {
                                         let d = D::distance(&dataset[a], &dataset[b]);
@@ -1022,13 +1017,53 @@ mod tests {
         };
     }
 
+    macro_rules! test_closest_pairs {
+        ($dataset:ident, $B:literal, $P:literal, $k:literal) => {
+            let t_build = Instant::now();
+            let pm_tree = PMTree::<Vec<f64>, Euclidean, $B, $P>::for_dataset(&$dataset, 1234);
+            assert_eq!(pm_tree.size(), $dataset.len());
+
+            eprintln!(
+                "tree built in {:?}, with height {}",
+                t_build.elapsed(),
+                pm_tree.height()
+            );
+            // let mut f = File::create("/tmp/tree.txt").unwrap();
+            // writeln!(f, "{:#?}", pm_tree).unwrap();
+
+            let t_baseline = Instant::now();
+            let mut expected = BinaryHeap::new();
+            for a in 0..$dataset.len() {
+                for b in (a + 1)..$dataset.len() {
+                    let d = OrdF64(Euclidean::distance(&$dataset[a], &$dataset[b]));
+                    expected.push((d, a, b));
+                    if expected.len() > $k {
+                        expected.pop();
+                    }
+                }
+            }
+            eprintln!("Time for linear scan {:?}", t_baseline.elapsed());
+            let expected: Vec<(f64, usize, usize)> = expected
+                .into_sorted_vec()
+                .into_iter()
+                .map(|(d, a, b)| (d.0, a, b))
+                .collect();
+
+            let t_tree = Instant::now();
+            let res: Vec<(f64, usize, usize)> = pm_tree.closest_pairs($k, &$dataset);
+            eprintln!("Time for tree {:?}", t_tree.elapsed());
+
+            assert_eq!(expected, res);
+        };
+    }
+
     #[test]
     fn range_query_glove25() {
         use ndarray::s;
         let path = ensure_glove25();
         let f = hdf5::File::open(path).unwrap();
         let data = f.dataset("/train").unwrap();
-        let array = data.read_slice_2d::<f64, _>(s![..624, ..]).unwrap();
+        let array = data.read_slice_2d::<f64, _>(s![..10000, ..]).unwrap();
         let mut dataset = Vec::new();
         for row in array.rows() {
             let r = row.as_slice().unwrap();
@@ -1037,6 +1072,27 @@ mod tests {
 
         test_range_query!(dataset, 32, 8, 0, 2.0);
         test_range_query!(dataset, 32, 8, 0, 4.0);
+    }
+    
+    #[test]
+    fn closest_pairs_glove25() {
+        use ndarray::s;
+        let path = ensure_glove25();
+        let f = hdf5::File::open(path).unwrap();
+        let data = f.dataset("/train").unwrap();
+        let array = data.read_slice_2d::<f64, _>(s![..10000, ..]).unwrap();
+        let mut dataset = Vec::new();
+        for row in array.rows() {
+            let r = row.as_slice().unwrap();
+            dataset.push(Vec::from(r));
+        }
+
+        test_closest_pairs!(dataset, 32, 8, 5);
+        test_closest_pairs!(dataset, 32, 8, 10);
+        test_closest_pairs!(dataset, 32, 8, 100);
+        test_closest_pairs!(dataset, 64, 8, 5);
+        test_closest_pairs!(dataset, 64, 8, 10);
+        test_closest_pairs!(dataset, 64, 8, 100);
     }
 
     #[test]
@@ -1116,7 +1172,6 @@ mod tests {
             .into_iter()
             .map(|(d, a, b)| (d.0, a, b))
             .collect();
-        dbg!(&expected);
 
         let actual = pm_tree.closest_pairs(k, &dataset);
 
