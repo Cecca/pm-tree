@@ -20,7 +20,7 @@ pub struct PMTree<T, D: Distance<T>, const B: usize, const P: usize> {
     _markerd: PhantomData<D>,
 }
 
-impl<T, D: Distance<T>, const B: usize, const P: usize> PMTree<T, D, B, P> {
+impl<T: Debug, D: Distance<T> + Debug, const B: usize, const P: usize> PMTree<T, D, B, P> {
     pub fn new(pivots: [usize; P]) -> Self {
         Self {
             root: Box::new(Node::Leaf(LeafNode::new())),
@@ -129,6 +129,7 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> PMTree<T, D, B, P> {
         match self.root.as_ref() {
             Node::Leaf(_leaf) => (), // do nothing in this case
             Node::Inner(inner) => {
+                let mut visited_leaves = 0;
                 let mut pq: BinaryHeap<NodePair<T, D, B, P>> = BinaryHeap::new();
                 let mut pl = ProgressLogger::builder()
                     .with_items_name("distances")
@@ -188,6 +189,7 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> PMTree<T, D, B, P> {
                         // join of two different nodes
                         match (node_pair.anode.as_ref(), node_pair.bnode.as_ref()) {
                             (Node::Leaf(l1), Node::Leaf(l2)) => {
+                                visited_leaves += 1;
                                 let t_leaf = Instant::now();
                                 for &a in &l1.elements[..l1.len] {
                                     for &b in &l2.elements[..l2.len] {
@@ -224,6 +226,12 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> PMTree<T, D, B, P> {
                     }
                 }
                 pl.stop();
+                let nleaves = self.count_leaves();
+                eprintln!(
+                    " visited {} leaf pairs over {}",
+                    visited_leaves,
+                    nleaves * nleaves
+                );
             }
         }
 
@@ -235,8 +243,100 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> PMTree<T, D, B, P> {
             .collect()
     }
 
+    pub fn for_each_subtree_cluster<'tree, F: FnMut(usize, usize) -> bool>(
+        &'tree self,
+        radius: f64,
+        mut callback: F,
+    ) {
+        let mut subtrees = Vec::new();
+        let mut stack = Vec::new();
+
+        stack.push((&self.root, 0));
+        while let Some((node, depth)) = stack.pop() {
+            match node.as_ref() {
+                Node::Leaf(_leaf) => (), // do nothing
+                Node::Inner(inner) => {
+                    for i in 0..inner.len {
+                        if inner.radius[i] < radius {
+                            subtrees.push((inner.radius[i], inner.children[i].as_ref().unwrap()));
+                        } else {
+                            stack.push((&inner.children[i].as_ref().unwrap(), depth + 1));
+                        }
+                    }
+                }
+            }
+        }
+
+        // sort the subtrees by increasing radius
+        subtrees.sort_by(|p1, p2| p1.0.partial_cmp(&p2.0).unwrap());
+
+        for (_radius, node) in subtrees {
+            node.for_each_id(&mut |a| {
+                node.for_each_id(&mut|b| {
+                    if a < b { // don't evaluate pairs twice, and skip self-pairs
+                        let should_stop = callback(a, b);
+                        if should_stop {
+                            return;
+                        }
+                    }
+                });
+            });
+        }
+    }
+
+    pub fn for_each_leaf_node_pair<F: FnMut(usize, usize)>(&self, mut callback: F) {
+        self.for_each_leaf(|leaf| {
+            for i in 0..leaf.len {
+                for j in (i + 1)..leaf.len {
+                    let a = leaf.elements[i];
+                    let b = leaf.elements[j];
+                    callback(a, b)
+                }
+            }
+        });
+    }
+
     fn for_each_leaf<F: FnMut(&LeafNode<T, D, B, P>)>(&self, mut callback: F) {
         self.root.for_each_leaf(&mut callback);
+    }
+
+    // the callback takes two element IDs, along with the radius of their lowest common ancestor
+    pub fn for_each_lca_pair<F>(&self, mut callback: F)
+    where
+        F: FnMut(f64, usize, usize),
+    {
+        let mut stack = Vec::new();
+        match self.root.as_ref() {
+            Node::Leaf(_) => (), // nothing to do
+            Node::Inner(inner) => {
+                for i in 0..inner.len {
+                    stack.push((inner.radius[i], inner.children[i].as_ref().unwrap()))
+                }
+            }
+        }
+
+        while let Some((radius, node)) = stack.pop() {
+            match node.as_ref() {
+                Node::Leaf(_) => (), // nothing to do
+                Node::Inner(inner) => {
+                    for i in 0..inner.len {
+                        for j in (i + 1)..inner.len {
+                            inner.children[i].as_ref().unwrap().for_each_id(&mut |a| {
+                                inner.children[j].as_ref().unwrap().for_each_id(&mut |b| {
+                                    callback(radius, a, b);
+                                })
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn count_leaves(&self) -> usize {
+        let mut cnt = 0;
+        self.for_each_leaf(|_| cnt += 1);
+        cnt
     }
 
     #[cfg(test)]
@@ -351,7 +451,7 @@ enum Node<T, D: Distance<T>, const B: usize, const P: usize> {
     Leaf(LeafNode<T, D, B, P>),
 }
 
-impl<T, D: Distance<T>, const B: usize, const P: usize> Node<T, D, B, P> {
+impl<T: Debug, D: Distance<T> + Debug, const B: usize, const P: usize> Node<T, D, B, P> {
     fn insert(
         &mut self,
         o: usize,
@@ -542,7 +642,7 @@ fn promote<T, D: Distance<T>>(o: usize, os: &[usize], dataset: &[T]) -> (usize, 
     let mut distances = vec![vec![0.0; os.len() + 1]; os.len() + 1];
     // compute cluster sizes
     for (i, &i_idx) in os.iter().enumerate() {
-        for (j, &j_idx) in os[(i+1)..].iter().enumerate() {
+        for (j, &j_idx) in os[(i + 1)..].iter().enumerate() {
             let d = D::distance(&dataset[i_idx], &dataset[j_idx]);
             distances[i][j] = d;
             distances[j][i] = d;
@@ -556,7 +656,7 @@ fn promote<T, D: Distance<T>>(o: usize, os: &[usize], dataset: &[T]) -> (usize, 
     let mut best_pair = (0, 0);
     let mut best_radius = std::f64::INFINITY;
     for (i, &i_idx) in os.iter().enumerate() {
-        for (j, &j_idx) in os[(i+1)..].iter().enumerate() {
+        for (j, &j_idx) in os[(i + 1)..].iter().enumerate() {
             // accumulate the maximum radius
             for h in 0..distances.len() {
                 let d1 = distances[i][h];
@@ -620,7 +720,7 @@ struct InnerNode<T, D: Distance<T>, const B: usize, const P: usize> {
     _markerd: PhantomData<D>,
 }
 
-impl<T, D: Distance<T>, const B: usize, const P: usize> InnerNode<T, D, B, P> {
+impl<T: Debug, D: Distance<T> + Debug, const B: usize, const P: usize> InnerNode<T, D, B, P> {
     fn new() -> Self {
         let children: [Option<Box<Node<T, D, B, P>>>; B] =
             unsafe { std::mem::transmute_copy(&[0usize; B]) };
@@ -1108,6 +1208,7 @@ where
     }
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct OrdF64(pub f64);
 
 impl PartialEq for OrdF64 {
@@ -1136,12 +1237,29 @@ pub struct Euclidean;
 
 impl Distance<Vec<f64>> for Euclidean {
     fn distance(a: &Vec<f64>, b: &Vec<f64>) -> f64 {
+        use packed_simd::f64x4;
         assert!(a.len() == b.len());
-        a.iter()
-            .zip(b.iter())
+
+        let achunks = a.chunks_exact(4);
+        let bchunks = b.chunks_exact(4);
+
+        let srem = achunks
+            .remainder()
+            .iter()
+            .zip(bchunks.remainder())
             .map(|(a, b)| (a - b).powi(2))
             .sum::<f64>()
-            .sqrt()
+            .sqrt();
+
+        let s = achunks
+            .map(f64x4::from_slice_unaligned)
+            .zip(bchunks.map(f64x4::from_slice_unaligned))
+            .map(|(a, b)| (a - b))
+            .map(|p| p * p)
+            .sum::<f64x4>()
+            .sum();
+
+        s + srem
     }
 }
 
