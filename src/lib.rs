@@ -1,9 +1,11 @@
 #![feature(drain_filter, new_uninit, maybe_uninit_uninit_array)]
 
+use progress_logger::ProgressLogger;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::fmt::Debug;
 use std::marker::PhantomData;
+use std::time::Instant;
 
 pub trait Distance<T> {
     fn distance(a: &T, b: &T) -> f64;
@@ -101,6 +103,7 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> PMTree<T, D, B, P> {
     pub fn closest_pairs(&self, k: usize, dataset: &[T]) -> Vec<(f64, usize, usize)> {
         let mut result: BinaryHeap<(OrdF64, usize, usize)> = BinaryHeap::new();
 
+        let t_init_result = Instant::now();
         // init the result with self-joins of the leaves
         self.for_each_leaf(|leaf: &LeafNode<T, D, B, P>| {
             for i in 0..leaf.len {
@@ -115,6 +118,11 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> PMTree<T, D, B, P> {
                 }
             }
         });
+        eprintln!(
+            " ({:?}) initialized result set, distance upper bound is {}",
+            t_init_result.elapsed(),
+            (result.peek().unwrap().0).0
+        );
 
         assert!(result.len() == k);
 
@@ -122,6 +130,9 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> PMTree<T, D, B, P> {
             Node::Leaf(_leaf) => (), // do nothing in this case
             Node::Inner(inner) => {
                 let mut pq: BinaryHeap<NodePair<T, D, B, P>> = BinaryHeap::new();
+                let mut pl = ProgressLogger::builder()
+                    .with_items_name("distances")
+                    .start();
                 // initialize with the direct children of the root
                 for i in 0..inner.len {
                     for j in i..inner.len {
@@ -141,6 +152,7 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> PMTree<T, D, B, P> {
 
                 while let Some(node_pair) = pq.pop() {
                     assert!(result.len() == k);
+                    // eprintln!(" Popped pair at mindist {}", node_pair.mindist);
                     if OrdF64(node_pair.mindist) > result.peek().unwrap().0 {
                         // early stop
                         break;
@@ -159,6 +171,7 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> PMTree<T, D, B, P> {
                                         let b = inner.routers[j];
                                         let mindist =
                                             inner.mindist(&inner, i, j, self.pivots, dataset);
+                                        // eprintln!(" Enqueuing at mindist {}", mindist);
                                         pq.push(NodePair::new(
                                             node_pair.level + 1,
                                             mindist,
@@ -175,6 +188,7 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> PMTree<T, D, B, P> {
                         // join of two different nodes
                         match (node_pair.anode.as_ref(), node_pair.bnode.as_ref()) {
                             (Node::Leaf(l1), Node::Leaf(l2)) => {
+                                let t_leaf = Instant::now();
                                 for &a in &l1.elements[..l1.len] {
                                     for &b in &l2.elements[..l2.len] {
                                         let d = D::distance(&dataset[a], &dataset[b]);
@@ -184,6 +198,8 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> PMTree<T, D, B, P> {
                                         }
                                     }
                                 }
+                                pl.update_light((l1.len * l2.len) as u64);
+                                // eprintln!(" Solved leaf in {:?}", t_leaf.elapsed());
                             }
                             (Node::Inner(n1), Node::Inner(n2)) => {
                                 for i in 0..n1.len {
@@ -191,6 +207,7 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> PMTree<T, D, B, P> {
                                         let a = n1.routers[i];
                                         let b = n2.routers[j];
                                         let mindist = n1.mindist(n2, i, j, self.pivots, dataset);
+                                        // eprintln!(" Enqueuing at mindist {}", mindist);
                                         pq.push(NodePair::new(
                                             node_pair.level + 1,
                                             mindist,
@@ -206,6 +223,7 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> PMTree<T, D, B, P> {
                         }
                     }
                 }
+                pl.stop();
             }
         }
 
@@ -521,30 +539,48 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> Node<T, D, B, P> {
 }
 
 fn promote<T, D: Distance<T>>(o: usize, os: &[usize], dataset: &[T]) -> (usize, usize) {
-    // assert!(os.len() <= B);
-    // // Pre-compute the pairwise distances
-    // let mut distmatrix = [[std::f64::INFINITY; B + 1]; B + 1];
-    // for i in 0..os.len() {
-    //     for j in (i + 1)..os.len() {
-    //         let d = D::distance(&dataset[os[i]], &dataset[os[j]]);
-    //         distmatrix[i][j] = d;
-    //         distmatrix[j][i] = d;
-    //     }
-    // }
-    // for j in 0..os.len() {
-    //     let d = D::distance(&dataset[o], &dataset[os[j]]);
-    //     distmatrix[j][B] = d;
-    //     distmatrix[B][j] = d;
-    // }
+    let mut distances = vec![vec![0.0; os.len() + 1]; os.len() + 1];
+    // compute cluster sizes
+    for (i, &i_idx) in os.iter().enumerate() {
+        for (j, &j_idx) in os[(i+1)..].iter().enumerate() {
+            let d = D::distance(&dataset[i_idx], &dataset[j_idx]);
+            distances[i][j] = d;
+            distances[j][i] = d;
+        }
+        let d = D::distance(&dataset[i_idx], &dataset[o]);
+        distances[i][os.len()] = d;
+        distances[os.len()][i] = d;
+    }
 
-    // // Compute how clusters would split
-    // let mut radii_sums = [[std::f64::INFINITY; B+1]; B+1];
-    // for i in 0..os.len() {
-    //     for j in 0..os.len() {
-    //         // os[i], os[j] is a pair
-    //     }
-    // }
-    (o, os[0])
+    // find the best pair
+    let mut best_pair = (0, 0);
+    let mut best_radius = std::f64::INFINITY;
+    for (i, &i_idx) in os.iter().enumerate() {
+        for (j, &j_idx) in os[(i+1)..].iter().enumerate() {
+            // accumulate the maximum radius
+            for h in 0..distances.len() {
+                let d1 = distances[i][h];
+                let d2 = distances[j][h];
+                let r = std::cmp::min_by(d1, d2, |a, b| a.partial_cmp(&b).unwrap());
+                if r < best_radius {
+                    best_radius = r;
+                    best_pair = (i_idx, j_idx);
+                }
+            }
+        }
+        // do it also for `o`
+        for h in 0..distances.len() {
+            let d1 = distances[i][h];
+            let d2 = distances[os.len()][h];
+            let r = std::cmp::min_by(d1, d2, |a, b| a.partial_cmp(&b).unwrap());
+            if r < best_radius {
+                best_radius = r;
+                best_pair = (i_idx, o);
+            }
+        }
+    }
+
+    best_pair
 }
 
 macro_rules! update_max {
@@ -981,7 +1017,14 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> LeafNode<T, D, B, P> {
         }
     }
 
-    fn do_insert(&mut self, o: usize, parent: Option<usize>, pivot_dists: [f64; P], pivots: [usize; P], dataset: &[T]) {
+    fn do_insert(
+        &mut self,
+        o: usize,
+        parent: Option<usize>,
+        pivot_dists: [f64; P],
+        pivots: [usize; P],
+        dataset: &[T],
+    ) {
         assert!(self.len < B);
         self.parent_distance[self.len] =
             parent.map(|parent| D::distance(&dataset[o], &dataset[parent]));
@@ -991,7 +1034,13 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> LeafNode<T, D, B, P> {
     }
 
     /// Split the current node, leaving it empty, and returns two new nodes with the corresponding routing points
-    fn split(&mut self, o: usize, pivot_dists: [f64; P], pivots: [usize; P], dataset: &[T]) -> (usize, Self, usize, Self) {
+    fn split(
+        &mut self,
+        o: usize,
+        pivot_dists: [f64; P],
+        pivots: [usize; P],
+        dataset: &[T],
+    ) -> (usize, Self, usize, Self) {
         assert!(self.len == B);
         let (o1, o2) = promote::<_, D>(o, &self.elements[..self.len], dataset);
         let data1 = &dataset[o1];
@@ -1010,11 +1059,23 @@ impl<T, D: Distance<T>, const B: usize, const P: usize> LeafNode<T, D, B, P> {
             if d1 < d2 {
                 // add to first node
                 assert!(n1.len < B);
-                n1.do_insert(self.elements[i], Some(o1), self.pivot_distances[i], pivots, dataset);
+                n1.do_insert(
+                    self.elements[i],
+                    Some(o1),
+                    self.pivot_distances[i],
+                    pivots,
+                    dataset,
+                );
             } else {
                 // add to second node
                 assert!(n2.len < B);
-                n2.do_insert(self.elements[i], Some(o2), self.pivot_distances[i], pivots, dataset);
+                n2.do_insert(
+                    self.elements[i],
+                    Some(o2),
+                    self.pivot_distances[i],
+                    pivots,
+                    dataset,
+                );
             }
         }
         self.len = 0;
