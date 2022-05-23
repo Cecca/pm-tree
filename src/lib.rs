@@ -1047,7 +1047,7 @@ where
     }
 }
 
-struct OrdF64(f64);
+pub struct OrdF64(pub f64);
 
 impl PartialEq for OrdF64 {
     fn eq(&self, other: &Self) -> bool {
